@@ -363,3 +363,12 @@ bool net_client_unpair(NetClient* client, uint32_t device)
     }
     return true;
 }
+
+bool net_client_stats(const NetClient* client, NetLinkStats* stats)
+{
+    if (client->state != NetClientState::ready)
+    {
+        return false;
+    }
+    return net_host_peer_stats(&client->session.host, client->peer, stats);
+}

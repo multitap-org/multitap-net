@@ -94,6 +94,9 @@ bool net_client_poll(NetClient* client, NetClientEvent* event);
 bool net_client_send(NetClient* client, NetChannel channel, const uint8_t* data, size_t size);
 void net_client_close(NetClient* client);
 
+// How the connection to the host is doing (ping). False unless ready.
+bool net_client_stats(const NetClient* client, NetLinkStats* stats);
+
 // Unpairs from the host at `device` in our list (saved at once). If we're
 // connected to it now it's told (it forgets us too) and the connection
 // closes; if not, it's only forgotten here. False if there's no such host.

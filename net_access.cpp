@@ -514,3 +514,12 @@ bool net_access_device_connected(const NetAccess* access, uint32_t device)
     }
     return false;
 }
+
+bool net_access_peer_stats(const NetAccess* access, uint32_t peer, NetLinkStats* stats)
+{
+    if (peer >= NET_MAX_PEERS || access->peers[peer].state != NetAccessPeerState::authorized)
+    {
+        return false;
+    }
+    return net_host_peer_stats(&access->session.host, peer, stats);
+}

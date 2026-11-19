@@ -117,5 +117,7 @@ void net_access_close(NetAccess* access, uint32_t peer);
 void net_access_remove_device(NetAccess* access, uint32_t device);
 // Changes a device's level (saved at once); a connected device is told.
 void net_access_set_level(NetAccess* access, uint32_t device, NetAccessLevel level);
+// How the connection to an authorized peer is doing (ping). False if it isn't.
+bool net_access_peer_stats(const NetAccess* access, uint32_t peer, NetLinkStats* stats);
 // Is this peer connected and authorized as that device?
 bool net_access_device_connected(const NetAccess* access, uint32_t device);

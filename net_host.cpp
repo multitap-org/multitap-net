@@ -378,6 +378,23 @@ bool net_host_send(NetHost* host, uint32_t peer, NetChannel channel, const uint8
     return true;
 }
 
+bool net_host_peer_stats(const NetHost* host, uint32_t peer, NetLinkStats* stats)
+{
+    if (host->enet == nullptr || peer >= host->enet->peerCount)
+    {
+        return false;
+    }
+    const ENetPeer* enet_peer = &host->enet->peers[peer];
+    if (enet_peer->state != ENET_PEER_STATE_CONNECTED)
+    {
+        return false;
+    }
+    stats->round_trip_ms = enet_peer->roundTripTime;
+    stats->jitter_ms = enet_peer->roundTripTimeVariance;
+    stats->loss = static_cast<float>(enet_peer->packetLoss) / static_cast<float>(ENET_PEER_PACKET_LOSS_SCALE);
+    return true;
+}
+
 void net_host_disconnect(NetHost* host, uint32_t peer)
 {
     ENetPeer* enet_peer = peer_get(host, peer);
