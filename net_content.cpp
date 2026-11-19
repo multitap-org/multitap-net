@@ -412,3 +412,37 @@ bool net_content_read_load_result(const uint8_t* data, size_t size, uint32_t* id
     read_status(&reader, status);
     return reader_done(&reader);
 }
+
+size_t net_content_write_game_state(uint8_t* out, size_t capacity, const NetGameState* state)
+{
+    Writer writer = {out, capacity, 0, true};
+    put_u8(&writer, NET_GAME_STATE_MESSAGE);
+    put_u8(&writer, state->running ? 1 : 0);
+    put_text(&writer, state->core_file.c_str(), state->core_file.size());
+    put_text(&writer, state->core_name.c_str(), state->core_name.size());
+    put_text(&writer, state->core_version.c_str(), state->core_version.size());
+    put_text(&writer, state->game.c_str(), state->game.size());
+    return writer.ok ? writer.size : 0;
+}
+
+bool net_content_read_game_state(const uint8_t* data, size_t size, NetGameState* state)
+{
+    Reader reader;
+    reader.data = data;
+    reader.size = size;
+    if (get_u8(&reader) != NET_GAME_STATE_MESSAGE)
+    {
+        return false;
+    }
+    uint8_t running = get_u8(&reader);
+    if (running > 1)
+    {
+        return false;
+    }
+    state->running = running == 1;
+    get_text(&reader, &state->core_file);
+    get_text(&reader, &state->core_name);
+    get_text(&reader, &state->core_version);
+    get_text(&reader, &state->game);
+    return reader_done(&reader);
+}

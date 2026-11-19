@@ -31,6 +31,13 @@
 //                                  count x { kind u8 | size u64 | name }
 //   client -> host  load_request   id u32 | core file | path ("" = the core without a game)
 //   host -> client  load_result    id u32 | status u8
+//   host -> client  game_state     running u8 | core file | core name | core version | game
+//
+// game_state (type 16, sent to every authorized device whatever its level:
+// a pad wants to show what it plays) says what runs: at every connection,
+// and whenever a game starts or closes. `game` is the game's name ("Chrono
+// Trigger (USA)"), "" for a core running alone; all texts "" when nothing
+// runs.
 //
 // Results are paged: a control message holds NET_LINK_MAX_PAYLOAD bytes and
 // a big folder doesn't fit, so a result carries what fits from `start` and
@@ -53,6 +60,8 @@ enum class NetContentMessage : uint8_t
     load_request = 132,
     load_result = 133,
 };
+
+constexpr uint8_t NET_GAME_STATE_MESSAGE = 16;   // the first application type (net_pairing.h)
 
 constexpr size_t NET_CONTENT_PATH_MAX = 4096;   // bytes of a virtual path, and of any text field
 
@@ -122,3 +131,15 @@ bool   net_content_read_load_request(const uint8_t* data, size_t size, uint32_t*
 
 size_t net_content_write_load_result(uint8_t* out, size_t capacity, uint32_t id, NetContentStatus status);
 bool   net_content_read_load_result(const uint8_t* data, size_t size, uint32_t* id, NetContentStatus* status);
+
+struct NetGameState
+{
+    bool        running = false;
+    std::string core_file;      // "snes9x_libretro.so"
+    std::string core_name;      // "Snes9x"
+    std::string core_version;
+    std::string game;           // "" = the core alone
+};
+
+size_t net_content_write_game_state(uint8_t* out, size_t capacity, const NetGameState* state);
+bool   net_content_read_game_state(const uint8_t* data, size_t size, NetGameState* state);
