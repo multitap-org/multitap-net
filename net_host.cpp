@@ -7,6 +7,7 @@
 #include <enet/enet.h>
 
 #include "host_log.h"
+#include "net_memory.h"
 
 // ENet's own global setup is process-wide; we count our users of it.
 static uint32_t g_init_count = 0;
@@ -114,9 +115,24 @@ static int ENET_CALLBACK intercept(ENetHost* enet, ENetEvent* event)
     return 0;
 }
 
+// ENet's memory comes from net_memory's reused size classes (no allocation
+// per packet once warmed up). ENet wants its own calling convention here.
+static void* ENET_CALLBACK enet_memory_alloc(size_t size)
+{
+    return net_memory_alloc(size);
+}
+
+static void ENET_CALLBACK enet_memory_free(void* memory)
+{
+    net_memory_free(memory);
+}
+
 bool net_init()
 {
-    if (g_init_count == 0 && enet_initialize() != 0)
+    ENetCallbacks callbacks = {};
+    callbacks.malloc = enet_memory_alloc;
+    callbacks.free = enet_memory_free;
+    if (g_init_count == 0 && enet_initialize_with_callbacks(ENET_VERSION, &callbacks) != 0)
     {
         host_log(LogLevel::error, "Network: ENet could not start");
         return false;
@@ -136,6 +152,7 @@ void net_shutdown()
     if (g_init_count == 0)
     {
         enet_deinitialize();
+        net_memory_release();
     }
 }
 

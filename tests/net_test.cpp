@@ -19,6 +19,7 @@
 
 #include "net_discovery.h"
 #include "net_host.h"
+#include "net_memory.h"
 #include "net_access.h"
 #include "net_client.h"
 #include "net_session.h"
@@ -330,6 +331,34 @@ static void test_session()
     check(session_pump_until(loop, &loop->listener_got_control), "ping arrived (decrypted)");
     check(session_pump_until(loop, &loop->listener_got_input), "input arrived (decrypted)");
     check(session_pump_until(loop, &loop->client_got_control), "pong came back");
+
+    // The frame loop must not allocate: like a game sending input every frame,
+    // both ways, first to warm the free lists up, then measured.
+    uint8_t frame_input[48] = {7, 1};
+    for (int round = 0; round < 2; round++)
+    {
+        uint64_t before = net_memory_stats().system_allocations;
+        for (int frame = 0; frame < 1000; frame++)
+        {
+            net_session_send(&loop->client, peer, NetChannel::input, frame_input, sizeof(frame_input));
+            net_session_send(&loop->listener, loop->listener_peer, NetChannel::input, frame_input, sizeof(frame_input));
+            session_pump(loop);
+        }
+        for (int i = 0; i < 20; i++)
+        {
+            session_pump(loop);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        uint64_t taken = net_memory_stats().system_allocations - before;
+        if (round == 1)
+        {
+            char what[96];
+            std::snprintf(what, sizeof(what), "warmed up: 1000 input packets each way took %llu blocks from the system",
+                          static_cast<unsigned long long>(taken));
+            check(taken == 0, what);
+            check(net_memory_stats().reused > 4000, "ENet's memory is being reused");
+        }
+    }
 
     // A plain ENet client (no handshake) and one that sends garbage as its
     // first handshake message: the listener closes both, never secured.
