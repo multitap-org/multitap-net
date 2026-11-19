@@ -18,6 +18,7 @@
 
 #include "net_discovery.h"
 #include "net_host.h"
+#include "net_session.h"
 
 static int g_failures = 0;
 
@@ -216,6 +217,176 @@ static void test_loopback()
     net_host_destroy(&loop.listener);
 }
 
+struct SessionLoop
+{
+    NetSession listener;
+    NetSession client;
+    NetKeypair listener_key;
+    NetKeypair client_key;
+    bool listener_secured = false;
+    bool client_secured = false;
+    uint32_t listener_peer = NET_NO_PEER;
+    uint8_t listener_saw_key[NET_KEY_SIZE] = {};
+    uint8_t client_saw_key[NET_KEY_SIZE] = {};
+    uint8_t listener_hash[NET_HASH_SIZE] = {};
+    uint8_t client_hash[NET_HASH_SIZE] = {};
+    bool listener_got_control = false;
+    bool listener_got_input = false;
+    bool client_got_control = false;
+    bool client_closed = false;
+    bool listener_closed_unsecured = false;
+};
+
+static void session_pump(SessionLoop* loop)
+{
+    NetSessionEvent event;
+    while (net_session_poll(&loop->listener, &event))
+    {
+        if (event.type == NetSessionEventType::secured)
+        {
+            loop->listener_secured = true;
+            loop->listener_peer = event.peer;
+            std::memcpy(loop->listener_saw_key, event.remote_key, NET_KEY_SIZE);
+            std::memcpy(loop->listener_hash, event.handshake_hash, NET_HASH_SIZE);
+        }
+        else if (event.type == NetSessionEventType::message)
+        {
+            if (event.channel == NetChannel::control && event.size == 4 && std::memcmp(event.data, "ping", 4) == 0)
+            {
+                loop->listener_got_control = true;
+                const uint8_t pong[] = {'p', 'o', 'n', 'g'};
+                net_session_send(&loop->listener, event.peer, NetChannel::control, pong, sizeof(pong));
+            }
+            else if (event.channel == NetChannel::input && event.size == 2 && event.data[0] == 7)
+            {
+                loop->listener_got_input = true;
+            }
+        }
+        else if (event.type == NetSessionEventType::closed && !event.was_secured)
+        {
+            loop->listener_closed_unsecured = true;
+        }
+    }
+    while (net_session_poll(&loop->client, &event))
+    {
+        if (event.type == NetSessionEventType::secured)
+        {
+            loop->client_secured = true;
+            std::memcpy(loop->client_saw_key, event.remote_key, NET_KEY_SIZE);
+            std::memcpy(loop->client_hash, event.handshake_hash, NET_HASH_SIZE);
+        }
+        else if (event.type == NetSessionEventType::message && event.channel == NetChannel::control &&
+                 event.size == 4 && std::memcmp(event.data, "pong", 4) == 0)
+        {
+            loop->client_got_control = true;
+        }
+        else if (event.type == NetSessionEventType::closed)
+        {
+            loop->client_closed = true;
+        }
+    }
+}
+
+static bool session_pump_until(SessionLoop* loop, const bool* flag)
+{
+    for (int i = 0; i < 300 && !*flag; i++)
+    {
+        session_pump(loop);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return *flag;
+}
+
+static void test_session()
+{
+    SessionLoop* loop = new SessionLoop();
+    net_keypair_generate(&loop->listener_key);
+    net_keypair_generate(&loop->client_key);
+    loop->listener.handshake_seconds = 0.5;
+    check(net_session_create_listener(&loop->listener, 0, "session test", &loop->listener_key), "session listener");
+    check(net_session_create_client(&loop->client, &loop->client_key), "session client");
+    NetAddress address;
+    net_address_from_text("127.0.0.1", net_host_port(&loop->listener.host), &address);
+
+    uint32_t peer = NET_NO_PEER;
+    check(net_session_connect(&loop->client, address, &peer), "session connect");
+    check(session_pump_until(loop, &loop->client_secured), "client secured");
+    check(session_pump_until(loop, &loop->listener_secured), "listener secured");
+    check(std::memcmp(loop->client_saw_key, loop->listener_key.public_key, NET_KEY_SIZE) == 0,
+          "client learned the listener's device key");
+    check(std::memcmp(loop->listener_saw_key, loop->client_key.public_key, NET_KEY_SIZE) == 0,
+          "listener learned the client's device key");
+    check(std::memcmp(loop->client_hash, loop->listener_hash, NET_HASH_SIZE) == 0, "same handshake hash");
+
+    const uint8_t ping[] = {'p', 'i', 'n', 'g'};
+    const uint8_t input[] = {7, 1};
+    check(net_session_send(&loop->client, peer, NetChannel::control, ping, sizeof(ping)), "send ping");
+    check(net_session_send(&loop->client, peer, NetChannel::input, input, sizeof(input)), "send input");
+    check(session_pump_until(loop, &loop->listener_got_control), "ping arrived (decrypted)");
+    check(session_pump_until(loop, &loop->listener_got_input), "input arrived (decrypted)");
+    check(session_pump_until(loop, &loop->client_got_control), "pong came back");
+
+    // A plain ENet client (no handshake) and one that sends garbage as its
+    // first handshake message: the listener closes both, never secured.
+    NetHost raw;
+    net_host_create_client(&raw);
+    uint32_t raw_peer = NET_NO_PEER;
+    net_host_connect(&raw, address, &raw_peer);
+    bool raw_closed = false;
+    bool raw_connected = false;
+    for (int i = 0; i < 300 && !raw_closed; i++)
+    {
+        session_pump(loop);
+        NetEvent event;
+        while (net_host_poll(&raw, &event))
+        {
+            if (event.type == NetEventType::connected)
+            {
+                raw_connected = true;
+            }
+            else if (event.type == NetEventType::disconnected)
+            {
+                raw_closed = true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(raw_connected && raw_closed, "a peer without a handshake is closed after the deadline");
+    check(session_pump_until(loop, &loop->listener_closed_unsecured), "listener reported it closed, never secured");
+
+    loop->listener_closed_unsecured = false;
+    net_host_connect(&raw, address, &raw_peer);
+    raw_closed = false;
+    bool sent_garbage = false;
+    for (int i = 0; i < 300 && !raw_closed; i++)
+    {
+        session_pump(loop);
+        NetEvent event;
+        while (net_host_poll(&raw, &event))
+        {
+            if (event.type == NetEventType::connected && !sent_garbage)
+            {
+                uint8_t garbage[40] = {1, 2, 3};
+                net_host_send(&raw, event.peer, NetChannel::control, garbage, 10);   // too short for "e"
+                sent_garbage = true;
+            }
+            else if (event.type == NetEventType::disconnected)
+            {
+                raw_closed = true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(sent_garbage && raw_closed, "a peer sending a bad handshake is closed");
+    net_host_destroy(&raw);
+
+    net_session_close(&loop->client, peer);
+    check(session_pump_until(loop, &loop->client_closed), "client closed");
+    net_session_destroy(&loop->client);
+    net_session_destroy(&loop->listener);
+    delete loop;
+}
+
 int main()
 {
     test_discovery_packets();
@@ -225,6 +396,7 @@ int main()
         return 1;
     }
     test_loopback();
+    test_session();
     net_shutdown();
     if (g_failures == 0)
     {
