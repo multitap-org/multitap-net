@@ -47,6 +47,7 @@ enum class NetClientEventType
     refused,   // `refusal`; the connection is closed
     message,   // from the host: `data`/`size` on `channel`
     closed,    // the host went away after ready
+    unpaired,  // the host unpaired us: it's gone from our list too (`closed` follows when it closes)
 };
 
 struct NetClientEvent
@@ -92,3 +93,11 @@ bool net_client_poll(NetClient* client, NetClientEvent* event);
 // Only when ready. A control payload starts with its type (NET_MESSAGE_FIRST_APP or above).
 bool net_client_send(NetClient* client, NetChannel channel, const uint8_t* data, size_t size);
 void net_client_close(NetClient* client);
+
+// How the connection to the host is doing (ping). False unless ready.
+bool net_client_stats(const NetClient* client, NetLinkStats* stats);
+
+// Unpairs from the host at `device` in our list (saved at once). If we're
+// connected to it now it's told (it forgets us too) and the connection
+// closes; if not, it's only forgotten here. False if there's no such host.
+bool net_client_unpair(NetClient* client, uint32_t device);

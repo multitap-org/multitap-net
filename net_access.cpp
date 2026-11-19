@@ -1,5 +1,7 @@
 #include "net_access.h"
 
+#include <cstdio>
+
 #include <cstring>
 
 #include "host_log.h"
@@ -243,6 +245,46 @@ static void on_pair_confirm(NetAccess* access, uint32_t index, const uint8_t* da
     *filled = true;
 }
 
+// Forgets a paired device (saved at once). Its connections stop reaching
+// the frontend (their `closed` still does). Each is told (unpair) and
+// closed, except `unpaired_by`: the peer that unpaired itself, which closes
+// on its own (NET_NO_PEER: none did).
+static void forget_device(NetAccess* access, uint32_t device, uint32_t unpaired_by)
+{
+    if (device >= access->trust.devices.size())
+    {
+        return;
+    }
+    for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
+    {
+        NetAccessPeer* peer = &access->peers[i];
+        if (peer->state != NetAccessPeerState::authorized)
+        {
+            continue;
+        }
+        if (peer->device == static_cast<int32_t>(device))
+        {
+            if (i != unpaired_by)
+            {
+                // Told first: the close waits for what's queued (disconnect_later).
+                uint8_t unpair[1];
+                net_session_send(&access->session, i, NetChannel::control, unpair,
+                                 net_message_write_unpair(unpair, sizeof(unpair)));
+                net_session_close(&access->session, i);
+            }
+            peer->state = NetAccessPeerState::none;   // nothing more from it reaches the frontend
+            peer->device = -1;
+            peer->forgotten = true;                   // but its `closed` does (its pads go)
+        }
+        else if (peer->device > static_cast<int32_t>(device))
+        {
+            peer->device--;   // indexes after it move down
+        }
+    }
+    net_trust_remove(&access->trust, device);
+    save_trust(access);
+}
+
 static bool on_message(NetAccess* access, const NetSessionEvent* session_event, NetAccessEvent* event)
 {
     uint32_t index = session_event->peer;
@@ -258,6 +300,19 @@ static bool on_message(NetAccess* access, const NetSessionEvent* session_event, 
         if (session_event->channel == NetChannel::control)
         {
             uint8_t type = net_message_type(session_event->data, session_event->size);
+            if (net_message_read_unpair(session_event->data, session_event->size))
+            {
+                // The device forgot us: forget it. It closes the connection;
+                // its `closed` comes later (forgotten).
+                uint32_t device = static_cast<uint32_t>(peer->device);
+                event->type = NetAccessEventType::unpaired;
+                event->peer = index;
+                event->device = -1;
+                event->address = session_event->address;
+                std::snprintf(event->name, sizeof(event->name), "%s", access->trust.devices[device].name.c_str());
+                forget_device(access, device, index);
+                return true;
+            }
             if (type == static_cast<uint8_t>(NetMessage::device_name))
             {
                 char name[NET_DEVICE_NAME_MAX + 1];
@@ -424,30 +479,7 @@ void net_access_close(NetAccess* access, uint32_t peer)
 
 void net_access_remove_device(NetAccess* access, uint32_t device)
 {
-    if (device >= access->trust.devices.size())
-    {
-        return;
-    }
-    for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
-    {
-        NetAccessPeer* peer = &access->peers[i];
-        if (peer->state == NetAccessPeerState::authorized)
-        {
-            if (peer->device == static_cast<int32_t>(device))
-            {
-                net_session_close(&access->session, i);
-                peer->state = NetAccessPeerState::none;   // nothing more from it reaches the frontend
-                peer->device = -1;
-                peer->forgotten = true;                   // but its `closed` does (its pads go)
-            }
-            else if (peer->device > static_cast<int32_t>(device))
-            {
-                peer->device--;   // indexes after it move down
-            }
-        }
-    }
-    net_trust_remove(&access->trust, device);
-    save_trust(access);
+    forget_device(access, device, NET_NO_PEER);
 }
 
 void net_access_set_level(NetAccess* access, uint32_t device, NetAccessLevel level)
@@ -481,4 +513,13 @@ bool net_access_device_connected(const NetAccess* access, uint32_t device)
         }
     }
     return false;
+}
+
+bool net_access_peer_stats(const NetAccess* access, uint32_t peer, NetLinkStats* stats)
+{
+    if (peer >= NET_MAX_PEERS || access->peers[peer].state != NetAccessPeerState::authorized)
+    {
+        return false;
+    }
+    return net_host_peer_stats(&access->session.host, peer, stats);
 }

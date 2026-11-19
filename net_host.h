@@ -112,6 +112,20 @@ bool net_host_discover_at(NetHost* host, NetAddress address);
 // Starts connecting; `connected` (or `disconnected`) follows from net_host_poll.
 bool net_host_connect(NetHost* host, NetAddress address, uint32_t* peer);
 bool net_host_send(NetHost* host, uint32_t peer, NetChannel channel, const uint8_t* data, size_t size);
+// How a connection is doing, as ENet measures it on its own (it pings an
+// idle peer every 500 ms): the round trip (smoothed), how much it varies
+// (jitter) and the share of reliable packets it had to send again. Round
+// trip, there and back, not one way.
+struct NetLinkStats
+{
+    uint32_t round_trip_ms = 0;
+    uint32_t jitter_ms = 0;
+    float    loss = 0.0f;   // 0..1
+};
+
+// False if `peer` isn't connected.
+bool net_host_peer_stats(const NetHost* host, uint32_t peer, NetLinkStats* stats);
+
 // Polite: queued data is sent first, then `disconnected` follows.
 void net_host_disconnect(NetHost* host, uint32_t peer);
 

@@ -296,3 +296,18 @@ bool net_message_read_pair_result(const uint8_t* data, size_t size, bool* ok)
     *ok = data[1] == 1;
     return true;
 }
+
+size_t net_message_write_unpair(uint8_t* out, size_t capacity)
+{
+    if (capacity < 1)
+    {
+        return 0;
+    }
+    out[0] = static_cast<uint8_t>(NetMessage::unpair);
+    return 1;
+}
+
+bool net_message_read_unpair(const uint8_t* data, size_t size)
+{
+    return size == 1 && data[0] == static_cast<uint8_t>(NetMessage::unpair);
+}
