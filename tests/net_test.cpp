@@ -12,13 +12,18 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <thread>
 
 #include <enet/enet.h>
 
 #include "net_discovery.h"
 #include "net_host.h"
+#include "net_access.h"
+#include "net_client.h"
 #include "net_session.h"
+#include "net_trust.h"
+#include "host_fs.h"
 
 static int g_failures = 0;
 
@@ -387,7 +392,206 @@ static void test_session()
     delete loop;
 }
 
-int main()
+struct PairLoop
+{
+    NetAccess host;
+    NetClient client;
+    NetClientEvent client_event;   // the last interesting one
+    bool client_got = false;
+    NetAccessEventType host_last = NetAccessEventType::none;
+    uint32_t host_events = 0;
+    bool host_got_message = false;
+    bool client_got_message = false;
+    bool client_closed = false;
+};
+
+static void pair_pump(PairLoop* loop)
+{
+    NetAccessEvent host_event;
+    while (net_access_poll(&loop->host, &host_event))
+    {
+        loop->host_last = host_event.type;
+        loop->host_events++;
+        if (host_event.type == NetAccessEventType::message && host_event.channel == NetChannel::control &&
+            host_event.size == 2 && host_event.data[0] == NET_MESSAGE_FIRST_APP && host_event.data[1] == 'x')
+        {
+            loop->host_got_message = true;
+            const uint8_t reply[] = {9, 9, 9};
+            net_access_send(&loop->host, host_event.peer, NetChannel::input, reply, sizeof(reply));
+        }
+    }
+    NetClientEvent event;
+    while (net_client_poll(&loop->client, &event))
+    {
+        if (event.type == NetClientEventType::message && event.channel == NetChannel::input && event.size == 3)
+        {
+            loop->client_got_message = true;
+        }
+        else if (event.type == NetClientEventType::closed)
+        {
+            loop->client_closed = true;
+        }
+        else
+        {
+            loop->client_event = event;
+            loop->client_got = true;
+        }
+    }
+}
+
+// Connects (with `code` or none) and waits for the client's outcome.
+static NetClientEvent pair_attempt(PairLoop* loop, NetAddress address, const char* code)
+{
+    loop->client_got = false;
+    loop->client_event = {};
+    if (!net_client_connect(&loop->client, address, code))
+    {
+        check(false, "client connect started");
+        return loop->client_event;
+    }
+    for (int i = 0; i < 300 && !loop->client_got; i++)
+    {
+        pair_pump(loop);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return loop->client_event;
+}
+
+static void pump_for(PairLoop* loop, int milliseconds)
+{
+    for (int i = 0; i < milliseconds / 10; i++)
+    {
+        pair_pump(loop);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+static void wrong_code(const char* code, char* out)
+{
+    std::snprintf(out, NET_PAIR_CODE_DIGITS + 1, "%s", code);
+    out[0] = out[0] == '9' ? '0' : static_cast<char>(out[0] + 1);
+}
+
+static void test_pairing(const char* folder)
+{
+    std::string host_trust = std::string(folder) + "/host_devices.cfg";
+    std::string client_trust = std::string(folder) + "/client_hosts.cfg";
+    std::string identity_path = std::string(folder) + "/identity.cfg";
+    std::remove(host_trust.c_str());
+    std::remove(client_trust.c_str());
+    std::remove(identity_path.c_str());
+
+    NetKeypair host_key;
+    NetKeypair client_key;
+    check(net_identity_load_or_create(identity_path.c_str(), &host_key), "identity created");
+    NetKeypair again;
+    check(net_identity_load_or_create(identity_path.c_str(), &again), "identity loaded");
+    check(std::memcmp(host_key.public_key, again.public_key, NET_KEY_SIZE) == 0, "the same identity comes back");
+    net_keypair_generate(&client_key);
+
+    PairLoop* loop = new PairLoop();
+    check(net_access_create(&loop->host, 0, "Living room", &host_key, host_trust.c_str()), "access host created");
+    check(net_client_create(&loop->client, &client_key, "Ana's phone", client_trust.c_str()), "client created");
+    NetAddress address;
+    net_address_from_text("127.0.0.1", net_host_port(&loop->host.session.host), &address);
+
+    NetClientEvent result = pair_attempt(loop, address, nullptr);
+    check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::not_paired,
+          "not paired, no code: refused (not_paired)");
+    result = pair_attempt(loop, address, "123456");
+    check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::pairing_closed,
+          "pairing closed: refused (pairing_closed)");
+
+    check(net_access_open_pairing(&loop->host), "pairing opened");
+    char code[NET_PAIR_CODE_DIGITS + 1];
+    std::snprintf(code, sizeof(code), "%s", loop->host.code);
+    check(net_pair_code_valid(code), "the code is 6 digits");
+    char bad[NET_PAIR_CODE_DIGITS + 1];
+    wrong_code(code, bad);
+    result = pair_attempt(loop, address, bad);
+    check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::wrong_code,
+          "wrong code: refused (wrong_code)");
+    pump_for(loop, 200);
+    check(loop->host_last == NetAccessEventType::pairing_failed, "host saw the failed attempt");
+    check(std::strcmp(code, loop->host.code) != 0, "the code changed after the failure");
+    check(loop->host.pairing_open, "pairing still open after one failure");
+
+    std::snprintf(code, sizeof(code), "%s", loop->host.code);
+    result = pair_attempt(loop, address, code);
+    check(result.type == NetClientEventType::ready && result.newly_paired, "right code: paired");
+    pump_for(loop, 100);
+    check(loop->host_last == NetAccessEventType::paired, "host reported the new device");
+    check(!loop->host.pairing_open, "pairing closes after a success");
+    check(loop->host.trust.devices.size() == 1 && loop->host.trust.devices[0].name == "Ana's phone",
+          "host trusts the client by name");
+    check(std::memcmp(loop->host.trust.devices[0].key, client_key.public_key, NET_KEY_SIZE) == 0,
+          "host trusts the client's key");
+    check(loop->client.trust.devices.size() == 1 && loop->client.trust.devices[0].name == "Living room",
+          "client trusts the host");
+    NetTrust saved;
+    net_trust_load(&saved, host_trust.c_str());
+    check(saved.devices.size() == 1 && std::memcmp(saved.devices[0].key, client_key.public_key, NET_KEY_SIZE) == 0,
+          "the host's list is on disk");
+
+    const uint8_t hello[] = {NET_MESSAGE_FIRST_APP, 'x'};
+    check(net_client_send(&loop->client, NetChannel::control, hello, sizeof(hello)), "app message sent");
+    for (int i = 0; i < 200 && !loop->client_got_message; i++)
+    {
+        pair_pump(loop);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(loop->host_got_message && loop->client_got_message, "app messages both ways");
+    const uint8_t sneaky[] = {static_cast<uint8_t>(NetMessage::welcome), 0};
+    check(!net_client_send(&loop->client, NetChannel::control, sneaky, sizeof(sneaky)),
+          "the app can't send pairing messages");
+
+    net_client_close(&loop->client);
+    pump_for(loop, 200);
+    result = pair_attempt(loop, address, nullptr);
+    check(result.type == NetClientEventType::ready && !result.newly_paired, "paired device welcomed without a code");
+    pump_for(loop, 100);
+
+    net_access_set_own(&loop->host, 0, true);
+    net_trust_load(&saved, host_trust.c_str());
+    check(saved.devices.size() == 1 && saved.devices[0].own, "own flag saved");
+
+    loop->client_closed = false;   // set by the close above
+    net_access_remove_device(&loop->host, 0);
+    for (int i = 0; i < 200 && !loop->client_closed; i++)
+    {
+        pair_pump(loop);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(loop->client_closed, "removing the device closes its connection");
+    result = pair_attempt(loop, address, nullptr);
+    check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::not_paired,
+          "a removed device is refused");
+
+    // A host that knows our key but whose key we don't know (an impostor
+    // that copied the list, say): refused even though it welcomes us.
+    loop->client.trust.devices.clear();
+    net_trust_add(&loop->host.trust, client_key.public_key, "Ana's phone");
+    result = pair_attempt(loop, address, nullptr);
+    check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::unknown_host,
+          "unknown host refused");
+    net_trust_remove(&loop->host.trust, 0);
+
+    // Five failures close pairing.
+    net_access_open_pairing(&loop->host);
+    for (uint32_t i = 0; i < NET_PAIRING_MAX_FAILURES && loop->host.pairing_open; i++)
+    {
+        wrong_code(loop->host.code, bad);
+        pair_attempt(loop, address, bad);
+        pump_for(loop, 150);
+    }
+    check(!loop->host.pairing_open, "pairing closes after five failures");
+
+    net_client_destroy(&loop->client);
+    net_access_destroy(&loop->host);
+    delete loop;
+}
+
+int main(int argc, char** argv)
 {
     test_discovery_packets();
     if (!net_init())
@@ -397,6 +601,16 @@ int main()
     }
     test_loopback();
     test_session();
+    if (argc > 1)
+    {
+        host_fs_make_directories(argv[1]);
+        test_pairing(argv[1]);
+    }
+    else
+    {
+        std::printf("FAIL no scratch folder given (pairing not checked)\n");
+        g_failures++;
+    }
     net_shutdown();
     if (g_failures == 0)
     {

@@ -7,7 +7,7 @@
 #include "host_log.h"
 #include "monocypher.h"
 
-static double now_seconds()
+double net_seconds()
 {
     std::chrono::steady_clock::duration since = std::chrono::steady_clock::now().time_since_epoch();
     return std::chrono::duration<double>(since).count();
@@ -74,7 +74,7 @@ static void on_connected(NetSession* session, const NetEvent* net)
     *peer = {};
     peer->connected = true;
     peer->initiator = initiator;
-    peer->connected_at = now_seconds();
+    peer->connected_at = net_seconds();
     net_link_init(&peer->link, initiator ? NetNoiseRole::initiator : NetNoiseRole::responder, &session->identity);
     if (initiator)
     {
@@ -155,7 +155,7 @@ static bool on_received(NetSession* session, const NetEvent* net, NetSessionEven
 // answers would hold a slot until ENet's own (much longer) timeout.
 static void check_deadlines(NetSession* session)
 {
-    double now = now_seconds();
+    double now = net_seconds();
     for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
     {
         NetSessionPeer* peer = &session->peers[i];

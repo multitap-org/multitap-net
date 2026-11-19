@@ -80,6 +80,9 @@ bool net_session_connect(NetSession* session, NetAddress address, uint32_t* peer
 bool net_session_send(NetSession* session, uint32_t peer, NetChannel channel, const uint8_t* data, size_t size);
 void net_session_close(NetSession* session, uint32_t peer);
 
+// Seconds on a steady clock (for network timers).
+double net_seconds();
+
 // A short, readable form of a device key for logs and screens:
 // "3fa2-91c0-7d4e-b815" (the first 8 bytes of BLAKE2b(key), hex in groups).
 void net_key_fingerprint(const uint8_t* key, char* out, size_t capacity);
