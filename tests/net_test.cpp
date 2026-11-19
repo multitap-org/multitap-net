@@ -434,6 +434,9 @@ struct PairLoop
     bool client_got_message = false;
     bool client_got_access = false;
     bool client_closed = false;
+    bool client_unpaired = false;
+    bool host_unpaired = false;
+    std::string host_unpaired_name;
 };
 
 static void pair_pump(PairLoop* loop)
@@ -443,6 +446,11 @@ static void pair_pump(PairLoop* loop)
     {
         loop->host_last = host_event.type;
         loop->host_events++;
+        if (host_event.type == NetAccessEventType::unpaired)
+        {
+            loop->host_unpaired = true;
+            loop->host_unpaired_name = host_event.name;
+        }
         if (host_event.type == NetAccessEventType::message && host_event.channel == NetChannel::control &&
             host_event.size == 2 && host_event.data[0] == NET_MESSAGE_FIRST_STREAM)
         {
@@ -470,6 +478,10 @@ static void pair_pump(PairLoop* loop)
         else if (event.type == NetClientEventType::access)
         {
             loop->client_got_access = true;
+        }
+        else if (event.type == NetClientEventType::unpaired)
+        {
+            loop->client_unpaired = true;
         }
         else
         {
@@ -640,6 +652,8 @@ static void test_pairing(const char* folder)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     check(loop->client_closed, "removing the device closes its connection");
+    check(loop->client_unpaired && loop->client.trust.devices.empty(),
+          "a connected device is told: it forgets the host too");
     pump_for(loop, 100);
     check(loop->host_last == NetAccessEventType::closed, "and the host reports it closed (its pads can go)");
     result = pair_attempt(loop, address, nullptr);
@@ -653,6 +667,39 @@ static void test_pairing(const char* folder)
     result = pair_attempt(loop, address, nullptr);
     check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::unknown_host,
           "unknown host refused");
+    net_trust_remove(&loop->host.trust, 0);
+
+    // Unpairing from the client, connected: the host forgets it too.
+    net_access_open_pairing(&loop->host);
+    result = pair_attempt(loop, address, loop->host.code);
+    check(result.type == NetClientEventType::ready && result.newly_paired, "paired again");
+    pump_for(loop, 100);
+    check(loop->host.trust.devices.size() == 1 && loop->client.trust.devices.size() == 1, "both lists have it");
+    loop->client_closed = false;
+    check(net_client_unpair(&loop->client, 0), "client unpairs");
+    check(loop->client.trust.devices.empty(), "the client forgot the host at once");
+    for (int i = 0; i < 200 && !(loop->host_unpaired && loop->host_last == NetAccessEventType::closed); i++)
+    {
+        pair_pump(loop);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(loop->host_unpaired && loop->host_unpaired_name == "ANA'S NEW PHONE", "the host is told who unpaired");
+    check(loop->host.trust.devices.empty(), "and forgets it");
+    net_trust_load(&saved, host_trust.c_str());
+    check(saved.devices.empty(), "the host's list on disk too");
+    check(loop->host_last == NetAccessEventType::closed, "the connection closed (the client closes it)");
+
+    // Unpairing from the client, not connected: only its own list.
+    net_access_open_pairing(&loop->host);
+    result = pair_attempt(loop, address, loop->host.code);
+    check(result.type == NetClientEventType::ready, "paired once more");
+    net_client_close(&loop->client);
+    pump_for(loop, 200);
+    loop->host_unpaired = false;
+    check(net_client_unpair(&loop->client, 0) && loop->client.trust.devices.empty(), "offline: forgotten here");
+    pump_for(loop, 100);
+    check(!loop->host_unpaired && loop->host.trust.devices.size() == 1, "offline: the host still has it");
+    check(!net_client_unpair(&loop->client, 0), "no such host: false");
     net_trust_remove(&loop->host.trust, 0);
 
     // Five failures close pairing.

@@ -19,6 +19,12 @@
 //   host -> client  pair_response    CPace share Yb, host confirm + host name
 //   client -> host  pair_confirm     client confirm
 //   host -> client  pair_result      ok / refused
+//   either side     unpair           I forget you: forget me (then the sender closes)
+//
+// Unpairing (Andrés, 2026-11-19) starts on either side: if the other side is
+// connected now it's told (unpair) and forgets the sender too; if not, the
+// sender only forgets it locally. The sender closes the connection (only
+// one side may close, net_host.h); the other side just forgets.
 //
 // The 6-digit code (shown by the host, typed on the client) is CPace's
 // password (net_cpace.h). CPace is bound to this exact connection: its session
@@ -47,6 +53,7 @@ enum class NetMessage : uint8_t
     pair_confirm = 5,
     pair_result = 6,
     device_name = 7,
+    unpair = 8,
 };
 constexpr uint8_t NET_MESSAGE_FIRST_APP = 16;
 constexpr uint8_t NET_MESSAGE_FIRST_STREAM = 64;
@@ -98,5 +105,7 @@ bool   net_message_read_pair_response(const uint8_t* data, size_t size, uint8_t*
                                       char* host_name);
 size_t net_message_write_pair_confirm(uint8_t* out, size_t capacity, const uint8_t* confirm);
 bool   net_message_read_pair_confirm(const uint8_t* data, size_t size, uint8_t* confirm);
+size_t net_message_write_unpair(uint8_t* out, size_t capacity);
+bool   net_message_read_unpair(const uint8_t* data, size_t size);
 size_t net_message_write_pair_result(uint8_t* out, size_t capacity, bool ok);
 bool   net_message_read_pair_result(const uint8_t* data, size_t size, bool* ok);

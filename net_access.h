@@ -61,6 +61,7 @@ enum class NetAccessEventType
     closed,           // `peer` left (`device` if it was authorized, else -1)
     pairing_failed,   // an attempt failed; the code changed (or pairing closed)
     pairing_closed,   // pairing closed on its own (time or failures)
+    unpaired,         // a connected device unpaired itself: forgotten here too (`name`); `closed` follows
 };
 
 struct NetAccessEvent
@@ -73,6 +74,7 @@ struct NetAccessEvent
     const uint8_t* data = nullptr;   // message: valid until the next poll
     size_t         size = 0;
     NetAccessLevel access = NetAccessLevel::gamepad;   // the device's, for authorized / paired / message
+    char           name[NET_DEVICE_NAME_MAX + 1] = {};   // unpaired: the device's name (it's no longer in the list)
 };
 
 struct NetAccess
@@ -109,7 +111,9 @@ double net_access_pairing_seconds_left(const NetAccess* access);
 bool net_access_send(NetAccess* access, uint32_t peer, NetChannel channel, const uint8_t* data, size_t size);
 void net_access_close(NetAccess* access, uint32_t peer);
 
-// Forget a device (saved at once); its connections are closed.
+// Forget a device (saved at once). A connected device is told (unpair: it
+// forgets this host too) and its connections are closed; one that isn't
+// connected is only forgotten here.
 void net_access_remove_device(NetAccess* access, uint32_t device);
 // Changes a device's level (saved at once); a connected device is told.
 void net_access_set_level(NetAccess* access, uint32_t device, NetAccessLevel level);

@@ -146,6 +146,22 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
     {
         char host_name[NET_DEVICE_NAME_MAX + 1];
         NetAccessLevel level = NetAccessLevel::gamepad;
+        if (net_message_read_unpair(data, size))
+        {
+            // The host forgot us: forget it. It closes the connection.
+            if (client->device >= 0)
+            {
+                net_trust_remove(&client->trust, static_cast<uint32_t>(client->device));
+                if (!net_trust_save(&client->trust, client->trust_path.c_str()))
+                {
+                    host_log(LogLevel::error, "Network: could not save the paired hosts to %s",
+                             client->trust_path.c_str());
+                }
+            }
+            client->device = -1;
+            event->type = NetClientEventType::unpaired;
+            return;
+        }
         if (net_message_read_welcome(data, size, &level, host_name))
         {
             // Sent again when the host changes our level.
@@ -319,4 +335,31 @@ void net_client_close(NetClient* client)
     {
         net_session_close(&client->session, client->peer);
     }
+}
+
+bool net_client_unpair(NetClient* client, uint32_t device)
+{
+    if (device >= client->trust.devices.size())
+    {
+        return false;
+    }
+    if (client->state == NetClientState::ready && client->device == static_cast<int32_t>(device))
+    {
+        // Told first: the close waits for what's queued (disconnect_later).
+        uint8_t unpair[1];
+        net_session_send(&client->session, client->peer, NetChannel::control, unpair,
+                         net_message_write_unpair(unpair, sizeof(unpair)));
+        net_session_close(&client->session, client->peer);
+        client->device = -1;
+    }
+    else if (client->device > static_cast<int32_t>(device))
+    {
+        client->device--;   // indexes after it move down
+    }
+    net_trust_remove(&client->trust, device);
+    if (!net_trust_save(&client->trust, client->trust_path.c_str()))
+    {
+        host_log(LogLevel::error, "Network: could not save the paired hosts to %s", client->trust_path.c_str());
+    }
+    return true;
 }
