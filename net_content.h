@@ -63,7 +63,7 @@ enum class NetContentMessage : uint8_t
 
 constexpr uint8_t NET_GAME_STATE_MESSAGE = 16;   // the first application type (net_pairing.h)
 
-constexpr size_t NET_CONTENT_PATH_MAX = 4096;   // bytes of a virtual path, and of any text field
+constexpr size_t NET_CONTENT_PATH_MAX = 4096;   // bytes of a virtual path (NET_WIRE_TEXT_MAX: any text field)
 
 enum class NetContentStatus : uint8_t
 {
