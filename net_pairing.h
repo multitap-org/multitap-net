@@ -6,9 +6,14 @@
 // the flow.
 //
 // Every control message starts with a type byte. Types below
-// NET_MESSAGE_FIRST_APP belong to this layer; the rest are the application's.
+// NET_MESSAGE_FIRST_APP belong to this layer; the rest are the application's,
+// and the type says the access level it needs (net_message_required_access):
+//   16..63 gamepad, 64..127 stream, 128..255 full.
+// The host drops what a device's level doesn't cover; the client is told its
+// level (welcome) only to show what it can use.
 //
-//   host -> client  welcome          you're a paired device       + host name
+//   host -> client  welcome          you're a paired device       + access + host name
+//   client -> host  device_name      what I'm called now (after welcome, every connection)
 //   host -> client  pairing_needed   you're not; pairing open?    + host name
 //   client -> host  pair_request     CPace share Ya               + client name
 //   host -> client  pair_response    CPace share Yb, host confirm + host name
@@ -41,8 +46,15 @@ enum class NetMessage : uint8_t
     pair_response = 4,
     pair_confirm = 5,
     pair_result = 6,
+    device_name = 7,
 };
 constexpr uint8_t NET_MESSAGE_FIRST_APP = 16;
+constexpr uint8_t NET_MESSAGE_FIRST_STREAM = 64;
+constexpr uint8_t NET_MESSAGE_FIRST_FULL = 128;
+
+// The level an application message type needs.
+NetAccessLevel net_message_required_access(uint8_t type);
+bool net_access_allows(NetAccessLevel have, NetAccessLevel need);
 
 constexpr size_t NET_PAIR_CODE_DIGITS = 6;
 constexpr size_t NET_PAIR_CONFIRM_SIZE = 32;
@@ -72,8 +84,10 @@ uint8_t net_message_type(const uint8_t* data, size_t size);
 // unless the payload is exactly that message. Names are cut to
 // NET_DEVICE_NAME_MAX bytes; read names are NUL-terminated in `name`
 // (NET_DEVICE_NAME_MAX + 1 bytes).
-size_t net_message_write_welcome(uint8_t* out, size_t capacity, const char* host_name);
-bool   net_message_read_welcome(const uint8_t* data, size_t size, char* host_name);
+size_t net_message_write_welcome(uint8_t* out, size_t capacity, NetAccessLevel access, const char* host_name);
+bool   net_message_read_welcome(const uint8_t* data, size_t size, NetAccessLevel* access, char* host_name);
+size_t net_message_write_device_name(uint8_t* out, size_t capacity, const char* name);
+bool   net_message_read_device_name(const uint8_t* data, size_t size, char* name);
 size_t net_message_write_pairing_needed(uint8_t* out, size_t capacity, bool open, const char* host_name);
 bool   net_message_read_pairing_needed(const uint8_t* data, size_t size, bool* open, char* host_name);
 size_t net_message_write_pair_request(uint8_t* out, size_t capacity, const uint8_t* share, const char* client_name);

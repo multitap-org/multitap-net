@@ -42,7 +42,8 @@ enum class NetClientRefusal
 enum class NetClientEventType
 {
     none,
-    ready,     // authorized (`newly_paired` if it just happened); `device` in our list
+    ready,     // authorized (`newly_paired` if it just happened); `device` in our list; `access`
+    access,    // the host changed our level (`access`)
     refused,   // `refusal`; the connection is closed
     message,   // from the host: `data`/`size` on `channel`
     closed,    // the host went away after ready
@@ -54,6 +55,7 @@ struct NetClientEvent
     NetClientRefusal   refusal = NetClientRefusal::none;
     bool           newly_paired = false;
     int32_t        device = -1;
+    NetAccessLevel access = NetAccessLevel::gamepad;   // what the host lets us do (to show; it enforces)
     NetChannel     channel = NetChannel::control;
     const uint8_t* data = nullptr;   // message: valid until the next poll
     size_t         size = 0;
@@ -76,6 +78,7 @@ struct NetClient
     NetCpace       cpace;                // between pair_request and pair_response
     uint8_t        isk[NET_CPACE_ISK_SIZE] = {};
     int32_t        device = -1;
+    NetAccessLevel access = NetAccessLevel::gamepad;
     std::vector<uint8_t> out;
 };
 

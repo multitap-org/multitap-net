@@ -11,6 +11,34 @@
 
 static constexpr const char* DEVICE_PREFIX = "device:";
 
+const char* net_access_level_name(NetAccessLevel level)
+{
+    switch (level)
+    {
+    case NetAccessLevel::gamepad:
+        return "gamepad";
+    case NetAccessLevel::stream:
+        return "stream";
+    case NetAccessLevel::full:
+        return "full";
+    }
+    return "gamepad";
+}
+
+bool net_access_level_parse(const char* name, NetAccessLevel* level)
+{
+    for (uint32_t i = 0; i < NET_ACCESS_LEVEL_COUNT; i++)
+    {
+        NetAccessLevel candidate = static_cast<NetAccessLevel>(i);
+        if (std::strcmp(name, net_access_level_name(candidate)) == 0)
+        {
+            *level = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
 static int32_t hex_value(char c)
 {
     if (c >= '0' && c <= '9')
@@ -134,10 +162,15 @@ bool net_trust_load(NetTrust* trust, const char* path)
             continue;
         }
         const char* name = settings_file_get(&file, section->c_str(), "name");
-        const char* own = settings_file_get(&file, section->c_str(), "own");
+        const char* access = settings_file_get(&file, section->c_str(), "access");
+        const char* own = settings_file_get(&file, section->c_str(), "own");   // before access existed
         const char* paired = settings_file_get(&file, section->c_str(), "paired");
         device.name = name != nullptr ? name : "";
-        device.own = own != nullptr && std::strcmp(own, "true") == 0;
+        if (access == nullptr || !net_access_level_parse(access, &device.access))
+        {
+            // Unknown or missing: the least, except an old "own" device.
+            device.access = own != nullptr && std::strcmp(own, "true") == 0 ? NetAccessLevel::full : NetAccessLevel::gamepad;
+        }
         device.paired = paired != nullptr ? paired : "";
         trust->devices.push_back(device);
     }
@@ -154,7 +187,7 @@ bool net_trust_save(const NetTrust* trust, const char* path)
         net_bytes_to_hex(device->key, NET_KEY_SIZE, hex, sizeof(hex));
         std::string section = std::string(DEVICE_PREFIX) + hex;
         settings_file_set(&file, section.c_str(), "name", device->name.c_str());
-        settings_file_set(&file, section.c_str(), "own", device->own ? "true" : "false");
+        settings_file_set(&file, section.c_str(), "access", net_access_level_name(device->access));
         settings_file_set(&file, section.c_str(), "paired", device->paired.c_str());
     }
     return settings_file_save(&file, path, "Paired devices (a device is its key; the name is only shown)");
@@ -224,6 +257,21 @@ uint32_t net_trust_add(NetTrust* trust, const uint8_t* key, const char* name)
     device.paired = today();
     trust->devices.push_back(device);
     return static_cast<uint32_t>(trust->devices.size() - 1);
+}
+
+bool net_trust_rename(NetTrust* trust, uint32_t index, const char* name)
+{
+    if (index >= trust->devices.size())
+    {
+        return false;
+    }
+    std::string cleaned = clean_name(name);
+    if (cleaned.empty() || cleaned == trust->devices[index].name)
+    {
+        return false;
+    }
+    trust->devices[index].name = cleaned;
+    return true;
 }
 
 void net_trust_remove(NetTrust* trust, uint32_t index)

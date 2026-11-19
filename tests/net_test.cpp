@@ -401,7 +401,9 @@ struct PairLoop
     NetAccessEventType host_last = NetAccessEventType::none;
     uint32_t host_events = 0;
     bool host_got_message = false;
+    bool host_got_stream_message = false;
     bool client_got_message = false;
+    bool client_got_access = false;
     bool client_closed = false;
 };
 
@@ -412,6 +414,11 @@ static void pair_pump(PairLoop* loop)
     {
         loop->host_last = host_event.type;
         loop->host_events++;
+        if (host_event.type == NetAccessEventType::message && host_event.channel == NetChannel::control &&
+            host_event.size == 2 && host_event.data[0] == NET_MESSAGE_FIRST_STREAM)
+        {
+            loop->host_got_stream_message = true;
+        }
         if (host_event.type == NetAccessEventType::message && host_event.channel == NetChannel::control &&
             host_event.size == 2 && host_event.data[0] == NET_MESSAGE_FIRST_APP && host_event.data[1] == 'x')
         {
@@ -430,6 +437,10 @@ static void pair_pump(PairLoop* loop)
         else if (event.type == NetClientEventType::closed)
         {
             loop->client_closed = true;
+        }
+        else if (event.type == NetClientEventType::access)
+        {
+            loop->client_got_access = true;
         }
         else
         {
@@ -545,15 +556,52 @@ static void test_pairing(const char* folder)
     check(!net_client_send(&loop->client, NetChannel::control, sneaky, sizeof(sneaky)),
           "the app can't send pairing messages");
 
+    // Reconnecting under a new name: the host's list follows it.
     net_client_close(&loop->client);
     pump_for(loop, 200);
+    loop->client.name = "ANA'S NEW PHONE";
     result = pair_attempt(loop, address, nullptr);
     check(result.type == NetClientEventType::ready && !result.newly_paired, "paired device welcomed without a code");
+    check(result.access == NetAccessLevel::gamepad, "a new device starts at gamepad (and is told)");
     pump_for(loop, 100);
-
-    net_access_set_own(&loop->host, 0, true);
+    check(loop->host.trust.devices[0].name == "ANA'S NEW PHONE", "the device's new name replaces the old one");
     net_trust_load(&saved, host_trust.c_str());
-    check(saved.devices.size() == 1 && saved.devices[0].own, "own flag saved");
+    check(saved.devices.size() == 1 && saved.devices[0].name == "ANA'S NEW PHONE", "and is saved");
+
+    // Access: a stream-level message from a gamepad-level device is dropped.
+    const uint8_t stream_message[] = {NET_MESSAGE_FIRST_STREAM, 's'};
+    check(net_client_send(&loop->client, NetChannel::control, stream_message, sizeof(stream_message)),
+          "stream message sent");
+    pump_for(loop, 200);
+    check(!loop->host_got_stream_message && loop->host.dropped_by_access == 1, "gamepad level: stream message dropped");
+
+    net_access_set_level(&loop->host, 0, NetAccessLevel::full);
+    for (int i = 0; i < 200 && !loop->client_got_access; i++)
+    {
+        pair_pump(loop);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(loop->client_got_access && loop->client.access == NetAccessLevel::full, "the client is told its new level");
+    net_client_send(&loop->client, NetChannel::control, stream_message, sizeof(stream_message));
+    for (int i = 0; i < 200 && !loop->host_got_stream_message; i++)
+    {
+        pair_pump(loop);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(loop->host_got_stream_message, "full level: stream message delivered");
+    net_trust_load(&saved, host_trust.c_str());
+    check(saved.devices.size() == 1 && saved.devices[0].access == NetAccessLevel::full, "access level saved");
+
+    // A list from before access: own = true reads as full, nothing as gamepad.
+    std::string old_list = std::string(folder) + "/old_devices.cfg";
+    const char* old_text = "[device:0101010101010101010101010101010101010101010101010101010101010101]\nname = A\nown = true\n"
+                           "[device:0202020202020202020202020202020202020202020202020202020202020202]\nname = B\n";
+    host_fs_write_file(old_list.c_str(), old_text, std::strlen(old_text));
+    NetTrust old_trust;
+    net_trust_load(&old_trust, old_list.c_str());
+    check(old_trust.devices.size() == 2 && old_trust.devices[0].access == NetAccessLevel::full &&
+              old_trust.devices[1].access == NetAccessLevel::gamepad,
+          "old lists migrate: own = true -> full");
 
     loop->client_closed = false;   // set by the close above
     net_access_remove_device(&loop->host, 0);

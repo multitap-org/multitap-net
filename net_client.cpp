@@ -144,6 +144,16 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
     uint8_t type = net_message_type(data, size);
     if (client->state == NetClientState::ready)
     {
+        char host_name[NET_DEVICE_NAME_MAX + 1];
+        NetAccessLevel level = NetAccessLevel::gamepad;
+        if (net_message_read_welcome(data, size, &level, host_name))
+        {
+            // Sent again when the host changes our level.
+            client->access = level;
+            event->type = NetClientEventType::access;
+            event->access = level;
+            return;
+        }
         if (type >= NET_MESSAGE_FIRST_APP)
         {
             event->type = NetClientEventType::message;
@@ -157,7 +167,8 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
     {
         char host_name[NET_DEVICE_NAME_MAX + 1];
         bool open = false;
-        if (net_message_read_welcome(data, size, host_name))
+        NetAccessLevel level = NetAccessLevel::gamepad;
+        if (net_message_read_welcome(data, size, &level, host_name))
         {
             int32_t device = net_trust_find(&client->trust, client->host_key);
             if (device < 0)
@@ -168,9 +179,14 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
             std::snprintf(client->host_name, sizeof(client->host_name), "%s", host_name);
             forget_secrets(client);
             client->device = device;
+            client->access = level;
             client->state = NetClientState::ready;
+            // Our name as it is now: the host's list follows a renamed device.
+            send_control(client, net_message_write_device_name(client->out.data(), client->out.size(),
+                                                               client->name.c_str()));
             event->type = NetClientEventType::ready;
             event->device = device;
+            event->access = level;
             return;
         }
         if (net_message_read_pairing_needed(data, size, &open, host_name))
@@ -209,9 +225,11 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
             }
             forget_secrets(client);
             client->device = static_cast<int32_t>(device);
+            client->access = NetAccessLevel::gamepad;   // where every new device starts
             client->state = NetClientState::ready;
             event->type = NetClientEventType::ready;
             event->newly_paired = true;
+            event->access = client->access;
             event->device = client->device;
             return;
         }

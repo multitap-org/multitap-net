@@ -132,10 +132,13 @@ static void on_secured(NetAccess* access, const NetSessionEvent* session_event, 
     {
         peer->state = NetAccessPeerState::authorized;
         peer->device = device;
-        send_control(access, index, net_message_write_welcome(access->out.data(), access->out.size(), access->name.c_str()));
+        NetAccessLevel level = access->trust.devices[static_cast<size_t>(device)].access;
+        send_control(access, index,
+                     net_message_write_welcome(access->out.data(), access->out.size(), level, access->name.c_str()));
         event->type = NetAccessEventType::authorized;
         event->peer = index;
         event->device = device;
+        event->access = level;
         event->address = session_event->address;
         *filled = true;
         return;
@@ -236,6 +239,7 @@ static void on_pair_confirm(NetAccess* access, uint32_t index, const uint8_t* da
     event->type = NetAccessEventType::paired;
     event->peer = index;
     event->device = static_cast<int32_t>(device);
+    event->access = access->trust.devices[device].access;
     *filled = true;
 }
 
@@ -250,13 +254,33 @@ static bool on_message(NetAccess* access, const NetSessionEvent* session_event, 
     bool filled = false;
     if (peer->state == NetAccessPeerState::authorized)
     {
-        // Control messages of this layer aren't the application's.
-        if (session_event->channel == NetChannel::control &&
-            net_message_type(session_event->data, session_event->size) < NET_MESSAGE_FIRST_APP)
+        NetAccessLevel level = access->trust.devices[static_cast<size_t>(peer->device)].access;
+        if (session_event->channel == NetChannel::control)
         {
-            return false;
+            uint8_t type = net_message_type(session_event->data, session_event->size);
+            if (type == static_cast<uint8_t>(NetMessage::device_name))
+            {
+                char name[NET_DEVICE_NAME_MAX + 1];
+                if (net_message_read_device_name(session_event->data, session_event->size, name) &&
+                    net_trust_rename(&access->trust, static_cast<uint32_t>(peer->device), name))
+                {
+                    save_trust(access);
+                }
+                return false;
+            }
+            // Other control messages of this layer aren't the application's,
+            // and an application message needs its level.
+            if (type < NET_MESSAGE_FIRST_APP || !net_access_allows(level, net_message_required_access(type)))
+            {
+                if (type >= NET_MESSAGE_FIRST_APP)
+                {
+                    access->dropped_by_access++;
+                }
+                return false;
+            }
         }
         event->type = NetAccessEventType::message;
+        event->access = level;
         event->peer = index;
         event->device = peer->device;
         event->address = session_event->address;
@@ -426,12 +450,23 @@ void net_access_remove_device(NetAccess* access, uint32_t device)
     save_trust(access);
 }
 
-void net_access_set_own(NetAccess* access, uint32_t device, bool own)
+void net_access_set_level(NetAccess* access, uint32_t device, NetAccessLevel level)
 {
-    if (device < access->trust.devices.size())
+    if (device >= access->trust.devices.size())
     {
-        access->trust.devices[device].own = own;
-        save_trust(access);
+        return;
+    }
+    access->trust.devices[device].access = level;
+    save_trust(access);
+    // A connected device gets a new welcome with its level (to show what it can use).
+    for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
+    {
+        if (access->peers[i].state == NetAccessPeerState::authorized &&
+            access->peers[i].device == static_cast<int32_t>(device))
+        {
+            send_control(access, i,
+                         net_message_write_welcome(access->out.data(), access->out.size(), level, access->name.c_str()));
+        }
     }
 }
 

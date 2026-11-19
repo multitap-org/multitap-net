@@ -8,7 +8,10 @@
 // reported `authorized`. Any other is told whether pairing is open: if it
 // isn't, it's closed right away; if it is, the device may pair with the code
 // on screen (net_access_open_pairing) and is reported `paired` when it does.
-// Only authorized peers' messages reach the frontend.
+// Only authorized peers' messages reach the frontend, and only the ones their
+// access level covers (net_pairing.h: the message type says the level it
+// needs). A paired device sends its name at every connection; the list
+// follows it.
 //
 // The code: 6 digits, new each time pairing opens, and replaced after every
 // attempt that doesn't succeed (wrong code, dropped connection): an attacker
@@ -54,7 +57,7 @@ enum class NetAccessEventType
     none,
     authorized,       // a paired device connected: `peer`, `device`
     paired,           // a new device paired and is now authorized: `peer`, `device`
-    message,          // from an authorized `peer`: `data`/`size` on `channel`
+    message,          // from an authorized `peer`, covered by its access: `data`/`size` on `channel`
     closed,           // `peer` left (`device` if it was authorized, else -1)
     pairing_failed,   // an attempt failed; the code changed (or pairing closed)
     pairing_closed,   // pairing closed on its own (time or failures)
@@ -69,6 +72,7 @@ struct NetAccessEvent
     NetChannel     channel = NetChannel::control;
     const uint8_t* data = nullptr;   // message: valid until the next poll
     size_t         size = 0;
+    NetAccessLevel access = NetAccessLevel::gamepad;   // the device's, for authorized / paired / message
 };
 
 struct NetAccess
@@ -82,6 +86,7 @@ struct NetAccess
     char          code[NET_PAIR_CODE_DIGITS + 1] = {};
     double        pairing_opened_at = 0.0;
     uint32_t      pairing_failures = 0;
+    uint32_t      dropped_by_access = 0;   // messages a device's level didn't cover
     NetAccessPeer peers[NET_MAX_PEERS];
     std::vector<uint8_t> out;        // messages we write (sized at creation)
 };
@@ -106,6 +111,7 @@ void net_access_close(NetAccess* access, uint32_t peer);
 
 // Forget a device (saved at once); its connections are closed.
 void net_access_remove_device(NetAccess* access, uint32_t device);
-void net_access_set_own(NetAccess* access, uint32_t device, bool own);
+// Changes a device's level (saved at once); a connected device is told.
+void net_access_set_level(NetAccess* access, uint32_t device, NetAccessLevel level);
 // Is this peer connected and authorized as that device?
 bool net_access_device_connected(const NetAccess* access, uint32_t device);

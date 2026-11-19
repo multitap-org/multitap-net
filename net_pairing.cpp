@@ -132,19 +132,58 @@ static bool read_name(const uint8_t* data, size_t size, char* name)
 
 // --- messages ---------------------------------------------------------------
 
-size_t net_message_write_welcome(uint8_t* out, size_t capacity, const char* host_name)
+NetAccessLevel net_message_required_access(uint8_t type)
 {
-    if (capacity < 2 + name_length(host_name))
+    if (type >= NET_MESSAGE_FIRST_FULL)
+    {
+        return NetAccessLevel::full;
+    }
+    if (type >= NET_MESSAGE_FIRST_STREAM)
+    {
+        return NetAccessLevel::stream;
+    }
+    return NetAccessLevel::gamepad;
+}
+
+bool net_access_allows(NetAccessLevel have, NetAccessLevel need)
+{
+    return static_cast<uint8_t>(have) >= static_cast<uint8_t>(need);
+}
+
+size_t net_message_write_welcome(uint8_t* out, size_t capacity, NetAccessLevel access, const char* host_name)
+{
+    if (capacity < 3 + name_length(host_name))
     {
         return 0;
     }
     out[0] = static_cast<uint8_t>(NetMessage::welcome);
-    return 1 + write_name(out + 1, host_name);
+    out[1] = static_cast<uint8_t>(access);
+    return 2 + write_name(out + 2, host_name);
 }
 
-bool net_message_read_welcome(const uint8_t* data, size_t size, char* host_name)
+bool net_message_read_welcome(const uint8_t* data, size_t size, NetAccessLevel* access, char* host_name)
 {
-    return size >= 1 && data[0] == static_cast<uint8_t>(NetMessage::welcome) && read_name(data + 1, size - 1, host_name);
+    if (size < 2 || data[0] != static_cast<uint8_t>(NetMessage::welcome) || data[1] >= NET_ACCESS_LEVEL_COUNT)
+    {
+        return false;
+    }
+    *access = static_cast<NetAccessLevel>(data[1]);
+    return read_name(data + 2, size - 2, host_name);
+}
+
+size_t net_message_write_device_name(uint8_t* out, size_t capacity, const char* name)
+{
+    if (capacity < 2 + name_length(name))
+    {
+        return 0;
+    }
+    out[0] = static_cast<uint8_t>(NetMessage::device_name);
+    return 1 + write_name(out + 1, name);
+}
+
+bool net_message_read_device_name(const uint8_t* data, size_t size, char* name)
+{
+    return size >= 1 && data[0] == static_cast<uint8_t>(NetMessage::device_name) && read_name(data + 1, size - 1, name);
 }
 
 size_t net_message_write_pairing_needed(uint8_t* out, size_t capacity, bool open, const char* host_name)
