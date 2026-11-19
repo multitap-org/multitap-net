@@ -563,6 +563,8 @@ static void test_pairing(const char* folder)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     check(loop->client_closed, "removing the device closes its connection");
+    pump_for(loop, 100);
+    check(loop->host_last == NetAccessEventType::closed, "and the host reports it closed (its pads can go)");
     result = pair_attempt(loop, address, nullptr);
     check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::not_paired,
           "a removed device is refused");

@@ -46,6 +46,7 @@ struct NetAccessPeer
     char     name[NET_DEVICE_NAME_MAX + 1] = {};   // what it called itself when pairing
     uint8_t  isk[NET_CPACE_ISK_SIZE] = {};
     int32_t  device = -1;   // index in trust.devices once authorized
+    bool     forgotten = false;   // its device was removed while connected: `closed` still reported
 };
 
 enum class NetAccessEventType

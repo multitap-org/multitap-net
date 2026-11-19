@@ -351,6 +351,7 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
             NetAccessPeer* peer = &access->peers[session_event.peer];
             NetAccessPeerState state = peer->state;
             int32_t device = peer->device;
+            bool forgotten = peer->forgotten;
             peer_reset(peer);
             if (state == NetAccessPeerState::pairing)
             {
@@ -360,7 +361,7 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
                 event->peer = session_event.peer;
                 filled = true;
             }
-            else if (state == NetAccessPeerState::authorized)
+            else if (state == NetAccessPeerState::authorized || forgotten)
             {
                 event->type = NetAccessEventType::closed;
                 event->peer = session_event.peer;
@@ -413,6 +414,7 @@ void net_access_remove_device(NetAccess* access, uint32_t device)
                 net_session_close(&access->session, i);
                 peer->state = NetAccessPeerState::none;   // nothing more from it reaches the frontend
                 peer->device = -1;
+                peer->forgotten = true;                   // but its `closed` does (its pads go)
             }
             else if (peer->device > static_cast<int32_t>(device))
             {
