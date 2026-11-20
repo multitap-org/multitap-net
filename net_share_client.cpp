@@ -90,7 +90,7 @@ static void handle_list_result(NetShareClient* client, const uint8_t* data, size
 // ---------------------------------------------------------------------------
 
 uint32_t net_share_client_copy(NetShareClient* client, bool to_remote, const char* local, const char* remote,
-                               uint64_t size, uint8_t flags)
+                               uint64_t size, uint64_t mtime, uint8_t flags)
 {
     NetShareClientCopy copy;
     copy.id = client->next_id++;
@@ -98,6 +98,7 @@ uint32_t net_share_client_copy(NetShareClient* client, bool to_remote, const cha
     copy.local = local;
     copy.remote = remote;
     copy.size = size;
+    copy.mtime = mtime;
     copy.flags = flags;
     client->queue.push_back(copy);
     return copy.id;
@@ -135,7 +136,7 @@ static void begin_next(NetShareClient* client)
         else
         {
             status = net_share_begin_put(client->local, client->current.local.c_str(), client->current.size,
-                                         client->current.flags, &client->target, &client->part, &client->offset);
+                                         client->current.mtime, client->current.flags, &client->target, &client->part, &client->offset);
         }
         if (status != NetShareStatus::ok)
         {

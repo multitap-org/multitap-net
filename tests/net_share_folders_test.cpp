@@ -186,66 +186,78 @@ int main(int argc, char** argv)
     std::string target;
     std::string part;
     uint64_t offset = 99;
-    check(net_share_begin_put(&folders, "roms/gba/Metroid Fusion.gba", 10, 0, &target, &part, &offset) ==
+    check(net_share_begin_put(&folders, "roms/gba/Metroid Fusion.gba", 10, 0, 0, &target, &part, &offset) ==
               NetShareStatus::exists,
           "existing file not replaced unless asked");
-    check(net_share_begin_put(&folders, "roms/gba/Metroid Fusion.gba", 10, NET_SHARE_PUT_REPLACE, &target, &part,
+    uint64_t there_size = 0;
+    uint64_t there_mtime = 0;
+    host_fs_file_info(game.c_str(), &there_size, &there_mtime);
+    check(net_share_begin_put(&folders, "roms/gba/Metroid Fusion.gba", there_size, there_mtime, 0, &target, &part,
+                              &offset) == NetShareStatus::same,
+          "same size and date: nothing to copy");
+    check(net_share_begin_put(&folders, "roms/gba/Metroid Fusion.gba", there_size, there_mtime + 1, 0, &target, &part,
+                              &offset) == NetShareStatus::exists,
+          "another date: exists");
+    check(net_share_begin_put(&folders, "roms/gba/Metroid Fusion.gba", there_size, there_mtime, NET_SHARE_PUT_REPLACE,
+                              &target, &part, &offset) == NetShareStatus::ok,
+          "the same file is still replaced when asked");
+    check(net_share_begin_put(&folders, "roms/gba/Metroid Fusion.gba", 10, 0, NET_SHARE_PUT_REPLACE, &target, &part,
                               &offset) == NetShareStatus::ok &&
               offset == 0 && target == game && part == roms + "/gba/.Metroid Fusion.gba.piccolo-part",
           "replace allowed when asked");
-    check(net_share_begin_put(&folders, "roms/gba/Zero Mission.gba", 8, 0, &target, &part, &offset) ==
+    check(net_share_begin_put(&folders, "roms/gba/Zero Mission.gba", 8, 0, 0, &target, &part, &offset) ==
                   NetShareStatus::ok &&
               offset == 3 && part == old_part,
           "resume from the part file");
-    check(net_share_begin_put(&folders, "roms/gba/Zero Mission.gba", 2, 0, &target, &part, &offset) ==
+    check(net_share_begin_put(&folders, "roms/gba/Zero Mission.gba", 2, 0, 0, &target, &part, &offset) ==
                   NetShareStatus::ok &&
               offset == 0 && !host_fs_exists(old_part.c_str()),
           "a part longer than the file starts again");
-    check(net_share_begin_put(&folders, "roms/gba", 8, NET_SHARE_PUT_REPLACE, &target, &part, &offset) ==
+    check(net_share_begin_put(&folders, "roms/gba", 8, 0, NET_SHARE_PUT_REPLACE, &target, &part, &offset) ==
               NetShareStatus::refused,
           "a folder can't be replaced");
-    check(net_share_begin_put(&folders, "roms", 8, NET_SHARE_PUT_REPLACE, &target, &part, &offset) ==
+    check(net_share_begin_put(&folders, "roms", 8, 0, NET_SHARE_PUT_REPLACE, &target, &part, &offset) ==
               NetShareStatus::refused,
           "a root can't be written");
-    check(net_share_begin_put(&folders, "roms/gba/.evil", 8, 0, &target, &part, &offset) == NetShareStatus::refused,
+    check(net_share_begin_put(&folders, "roms/gba/.evil", 8, 0, 0, &target, &part, &offset) == NetShareStatus::refused,
           "hidden names can't be written");
-    check(net_share_begin_put(&folders, "roms/../outside/x", 8, 0, &target, &part, &offset) ==
+    check(net_share_begin_put(&folders, "roms/../outside/x", 8, 0, 0, &target, &part, &offset) ==
               NetShareStatus::refused,
           "put with \"..\" refused");
-    check(net_share_begin_put(&folders, "roms/gba/Metroid Fusion.gba/x", 8, 0, &target, &part, &offset) ==
+    check(net_share_begin_put(&folders, "roms/gba/Metroid Fusion.gba/x", 8, 0, 0, &target, &part, &offset) ==
               NetShareStatus::refused,
           "a file where a folder should be");
-    check(net_share_begin_put(&folders, "SAVES/mGBA/Golden Sun.srm", 8, 0, &target, &part, &offset) ==
+    check(net_share_begin_put(&folders, "SAVES/mGBA/Golden Sun.srm", 8, 0, 0, &target, &part, &offset) ==
               NetShareStatus::ok,
           "put into SAVES");
-    check(net_share_begin_put(&folders, "STATES/mGBA/Golden Sun.state1", 8, 0, &target, &part, &offset) ==
+    check(net_share_begin_put(&folders, "STATES/mGBA/Golden Sun.state1", 8, 0, 0, &target, &part, &offset) ==
                   NetShareStatus::ok &&
               host_fs_is_directory((states + "/mGBA").c_str()),
           "missing core folder made");
-    check(net_share_begin_put(&folders, "roms/gba/Huge.gba", UINT64_MAX / 2, 0, &target, &part, &offset) ==
+    check(net_share_begin_put(&folders, "roms/gba/Huge.gba", UINT64_MAX / 2, 0, 0, &target, &part, &offset) ==
               NetShareStatus::no_space,
           "no space for a huge file");
 #if !defined(_WIN32)
-    check(net_share_begin_put(&folders, "roms/out/new/file.bin", 8, 0, &target, &part, &offset) ==
+    check(net_share_begin_put(&folders, "roms/out/new/file.bin", 8, 0, 0, &target, &part, &offset) ==
                   NetShareStatus::refused &&
               !host_fs_exists((outside + "/new").c_str()),
           "put through a link out refused, nothing made outside");
-    check(net_share_begin_put(&folders, "roms/gba/secret.txt", 8, NET_SHARE_PUT_REPLACE, &target, &part, &offset) ==
+    check(net_share_begin_put(&folders, "roms/gba/secret.txt", 8, 0, NET_SHARE_PUT_REPLACE, &target, &part, &offset) ==
               NetShareStatus::refused,
           "a link target is never replaced");
-    check(net_share_begin_put(&folders, "roms/same/New.gba", 8, 0, &target, &part, &offset) == NetShareStatus::ok,
+    check(net_share_begin_put(&folders, "roms/same/New.gba", 8, 0, 0, &target, &part, &offset) == NetShareStatus::ok,
           "put through a link inside allowed");
 #endif
 
     // Finish and discard.
-    check(net_share_begin_put(&folders, "roms/gba/New Game.gba", 4, 0, &target, &part, &offset) == NetShareStatus::ok,
+    check(net_share_begin_put(&folders, "roms/gba/New Game.gba", 4, 0, 0, &target, &part, &offset) == NetShareStatus::ok,
           "new put");
     write_text(&part, "NEW!");
     check(net_share_finish_put(part.c_str(), target.c_str(), 1600000000) && !host_fs_exists(part.c_str()),
           "finished: part renamed");
     check(host_fs_file_info(target.c_str(), &file_size, &mtime) && file_size == 4 && mtime == 1600000000,
           "finished file has its size and date");
-    check(net_share_begin_put(&folders, "roms/gba/Bad.gba", 4, 0, &target, &part, &offset) == NetShareStatus::ok,
+    check(net_share_begin_put(&folders, "roms/gba/Bad.gba", 4, 0, 0, &target, &part, &offset) == NetShareStatus::ok,
           "another put");
     write_text(&part, "BAD!");
     net_share_discard_put(part.c_str());

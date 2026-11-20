@@ -61,13 +61,15 @@ NetShareStatus net_share_resolve_get(const NetShareFolders* folders, const char*
 //   - missing folders under the shared folder are created (the deepest one
 //     that exists must be inside it: a symlink can't lead the new ones out);
 //   - an existing target: a folder or symlink is refused, a file needs
-//     NET_SHARE_PUT_REPLACE (otherwise `exists`);
+//     NET_SHARE_PUT_REPLACE (otherwise `exists`, or `same` when it has
+//     `file_size` and `mtime` already: piccolo's copies keep the date, so
+//     that's the file copied before);
 //   - enough free space for what's still to come (`no_space`).
 // `*target` is the file's host path and `*part` the part file the bytes go
 // into; `*offset` is how much of it is already there from an earlier try
 // (a part longer than the file is thrown away and starts again at 0).
 NetShareStatus net_share_begin_put(const NetShareFolders* folders, const char* path, uint64_t file_size,
-                                   uint8_t flags, std::string* target, std::string* part, uint64_t* offset);
+                                   uint64_t mtime, uint8_t flags, std::string* target, std::string* part, uint64_t* offset);
 
 // The whole file arrived and its hash matched: the part replaces the target
 // and takes `mtime` (0 = leave the date it has). False (logged) if the

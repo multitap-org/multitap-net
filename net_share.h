@@ -77,8 +77,9 @@ enum class NetShareStatus : uint8_t
     busy,        // too many transfers at once; ask again later
     mismatch,    // the whole file arrived but its hash doesn't match: thrown away
     failed,      // it couldn't be read or written (see that side's log)
+    same,        // put without NET_SHARE_PUT_REPLACE onto a file of the same size and date: nothing to copy
 };
-constexpr uint8_t NET_SHARE_STATUS_COUNT = 8;
+constexpr uint8_t NET_SHARE_STATUS_COUNT = 9;
 
 enum class NetShareKind : uint8_t
 {

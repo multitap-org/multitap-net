@@ -320,7 +320,7 @@ NetShareStatus net_share_resolve_get(const NetShareFolders* folders, const char*
 // ---------------------------------------------------------------------------
 
 NetShareStatus net_share_begin_put(const NetShareFolders* folders, const char* path, uint64_t file_size,
-                                   uint8_t flags, std::string* target, std::string* part, uint64_t* offset)
+                                   uint64_t mtime, uint8_t flags, std::string* target, std::string* part, uint64_t* offset)
 {
     std::vector<std::string> parts;
     const NetShareRoot* root = nullptr;
@@ -380,7 +380,11 @@ NetShareStatus net_share_begin_put(const NetShareFolders* folders, const char* p
         }
         if ((flags & NET_SHARE_PUT_REPLACE) == 0)
         {
-            return NetShareStatus::exists;
+            uint64_t there_size = 0;
+            uint64_t there_mtime = 0;
+            bool same = mtime != 0 && host_fs_file_info(file.c_str(), &there_size, &there_mtime) &&
+                        there_size == file_size && there_mtime == mtime;
+            return same ? NetShareStatus::same : NetShareStatus::exists;
         }
     }
 

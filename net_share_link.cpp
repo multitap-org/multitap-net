@@ -291,10 +291,10 @@ bool net_share_link_listing(NetShareLink* link, std::string* path, NetShareStatu
 }
 
 uint32_t net_share_link_copy(NetShareLink* link, bool to_remote, const char* local, const char* remote, uint64_t size,
-                             uint8_t flags)
+                             uint64_t mtime, uint8_t flags)
 {
     std::lock_guard<std::mutex> guard(link->lock);
-    return net_share_client_copy(&link->share, to_remote, local, remote, size, flags);
+    return net_share_client_copy(&link->share, to_remote, local, remote, size, mtime, flags);
 }
 
 void net_share_link_cancel(NetShareLink* link)
