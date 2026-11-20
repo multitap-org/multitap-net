@@ -13,8 +13,11 @@
 // (a big control message, ENet's peer array) goes to malloc as before: those
 // are rare and not per frame.
 //
-// Blocks are kept until net_memory_release (at net_shutdown). One thread:
-// ENet runs on the frontend's main thread (the free lists have no lock).
+// Blocks are kept until net_memory_release (at net_shutdown). ENet may run
+// on more than one thread at once (net_service / net_client_service poll on
+// their own, a client's discovery host on the main thread, a test's host and
+// client in one process): the free lists are global, so one mutex guards
+// them (taken for a few instructions; uncontended it costs next to nothing).
 
 #include <cstddef>
 #include <cstdint>

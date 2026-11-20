@@ -324,7 +324,10 @@ bool net_noise_read(NetNoise* noise, const uint8_t* message, size_t size, uint8_
     }
     size_t used = 0;
     size_t read = 0;
-    uint8_t static_key[NET_KEY_SIZE];
+    // Room for the encrypted size too: decrypt_and_hash copies it as it is
+    // when there's no key yet (never the case for s, but GCC can't tell and
+    // -Warray-bounds refuses it in Release builds).
+    uint8_t static_key[NET_KEY_SIZE + NET_MAC_SIZE];
 
     if (noise->message == 0 || noise->message == 1)
     {

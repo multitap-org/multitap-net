@@ -1,6 +1,7 @@
 #include "net_memory.h"
 
 #include <cstdlib>
+#include <mutex>
 
 #include "host_log.h"
 
@@ -22,6 +23,7 @@ static_assert(sizeof(BlockHeader) == 16, "the header keeps 16-byte alignment");
 // (one set for the process, like ENet's own global setup).
 static BlockHeader*   g_free[CLASS_COUNT] = {};
 static NetMemoryStats g_stats;
+static std::mutex     g_lock;   // guards g_free and g_stats (see the header)
 
 static uint32_t class_for(size_t size)
 {
@@ -44,13 +46,16 @@ void* net_memory_alloc(size_t size)
 {
     uint32_t size_class = class_for(size);
     BlockHeader* header = nullptr;
+    g_lock.lock();
     if (size_class != LARGE && g_free[size_class] != nullptr)
     {
         header = g_free[size_class];
         g_free[size_class] = header->next;
         g_stats.reused++;
+        g_stats.in_use++;
     }
-    else
+    g_lock.unlock();
+    if (header == nullptr)
     {
         size_t bytes = sizeof(BlockHeader) + (size_class == LARGE ? size : CLASS_SIZES[size_class]);
         header = static_cast<BlockHeader*>(std::malloc(bytes));
@@ -58,15 +63,17 @@ void* net_memory_alloc(size_t size)
         {
             return nullptr;   // ENet calls its no_memory callback
         }
+        g_lock.lock();
         g_stats.system_allocations++;
         if (size_class == LARGE)
         {
             g_stats.large++;
         }
+        g_stats.in_use++;
+        g_lock.unlock();
     }
     header->size_class = size_class;
     header->next = nullptr;
-    g_stats.in_use++;
     return block_memory(header);
 }
 
@@ -77,18 +84,24 @@ void net_memory_free(void* memory)
         return;
     }
     BlockHeader* header = static_cast<BlockHeader*>(memory) - 1;
+    g_lock.lock();
     g_stats.in_use--;
-    if (header->size_class == LARGE)
+    bool large = header->size_class == LARGE;
+    if (!large)
+    {
+        header->next = g_free[header->size_class];
+        g_free[header->size_class] = header;
+    }
+    g_lock.unlock();
+    if (large)
     {
         std::free(header);
-        return;
     }
-    header->next = g_free[header->size_class];
-    g_free[header->size_class] = header;
 }
 
 void net_memory_release()
 {
+    std::lock_guard<std::mutex> guard(g_lock);
     if (g_stats.in_use != 0)
     {
         host_log(LogLevel::warning, "Network: %llu ENet blocks still in use at shutdown",
@@ -107,5 +120,6 @@ void net_memory_release()
 
 NetMemoryStats net_memory_stats()
 {
+    std::lock_guard<std::mutex> guard(g_lock);
     return g_stats;
 }
