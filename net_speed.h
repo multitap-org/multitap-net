@@ -22,16 +22,19 @@
 // the usable rate by asking for rising rates (5, 10, 20, 50, 100 Mbit/s...)
 // until the loss passes a few percent.
 //
-// speed_request needs STREAM access (it can fill the network); the host
-// ignores speed_data from devices below it.
+// Any paired device may run it (GAMEPAD; Andrés, 2026-11-20). The host
+// limits the rate (NET_SPEED_MAX_KBPS, NET_SPEED_MAX_MS) and runs one test
+// at a time.
 
 #include <cstddef>
 #include <cstdint>
 #include <string>
 
-constexpr uint8_t  NET_SPEED_REQUEST = 64;   // control, client -> host
-constexpr uint8_t  NET_SPEED_REPORT = 65;    // control, host -> client
-constexpr uint8_t  NET_SPEED_RESULT = 66;    // control, client -> host
+// GAMEPAD range since 2026-11-20 (Andrés: any paired device may test the
+// network; it was 64-66, STREAM).
+constexpr uint8_t  NET_SPEED_REQUEST = 24;   // control, client -> host
+constexpr uint8_t  NET_SPEED_REPORT = 25;    // control, host -> client
+constexpr uint8_t  NET_SPEED_RESULT = 26;    // control, client -> host
 constexpr uint8_t  NET_INPUT_TYPE_SPEED = 3; // input channel
 constexpr uint32_t NET_SPEED_MAX_KBPS = 200000;      // 200 Mbit/s
 constexpr uint32_t NET_SPEED_MAX_MS = 5000;
