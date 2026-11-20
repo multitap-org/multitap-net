@@ -4,7 +4,7 @@
 #include <cstring>
 #include <random>
 
-#include <enet/enet.h>
+#include <enet.h>
 
 #include "host_log.h"
 #include "net_memory.h"
@@ -41,19 +41,23 @@ static void name_copy(std::string* out, const char* name)
     out->assign(name, length);
 }
 
+static_assert(sizeof(in6_addr) == sizeof(NetAddress::ip), "NetAddress holds an IPv6 address");
+
 static NetAddress address_from_enet(const ENetAddress* address)
 {
     NetAddress result;
-    result.host = address->host;
+    std::memcpy(result.ip, &address->host, sizeof(result.ip));
     result.port = address->port;
+    result.scope = address->sin6_scope_id;
     return result;
 }
 
 static ENetAddress address_to_enet(NetAddress address)
 {
     ENetAddress result = {};
-    result.host = address.host;
+    std::memcpy(&result.host, address.ip, sizeof(address.ip));
     result.port = address.port;
+    result.sin6_scope_id = address.scope;
     return result;
 }
 
@@ -69,7 +73,7 @@ static bool send_raw(ENetHost* enet, const ENetAddress* to, uint8_t* data, size_
 // Our datagrams, before ENet looks at them. 1 = ours (handled), 0 = ENet's.
 // Anything that isn't exactly one of our packets goes on to ENet, which drops
 // what isn't its own (see net_discovery.h for why ours never look like ENet's).
-static int ENET_CALLBACK intercept(ENetHost* enet, ENetEvent* event)
+static int ENET_CALLBACK intercept(ENetHost* enet, void* event)
 {
     (void)event;
     NetHost* host = g_polling;
@@ -283,6 +287,7 @@ bool net_host_poll(NetHost* host, NetEvent* event)
         event->type = NetEventType::connected;
         break;
     case ENET_EVENT_TYPE_DISCONNECT:
+    case ENET_EVENT_TYPE_DISCONNECT_TIMEOUT:   // zpl-c's ENet tells a timeout apart; same to us
         event->type = NetEventType::disconnected;
         break;
     case ENET_EVENT_TYPE_RECEIVE:
@@ -318,9 +323,18 @@ static bool discover_to(NetHost* host, const ENetAddress* to)
 
 bool net_host_discover(NetHost* host, uint16_t port)
 {
-    ENetAddress to = {};
-    to.host = ENET_HOST_BROADCAST;
-    to.port = port;
+    // 255.255.255.255 as ::ffff:255.255.255.255: the dual-stack socket sends
+    // it as an IPv4 broadcast (ENet's own mapping turns 255.255.255.255 into
+    // all-ones IPv6, which isn't one).
+    NetAddress broadcast;
+    broadcast.ip[10] = 0xFF;
+    broadcast.ip[11] = 0xFF;
+    broadcast.ip[12] = 0xFF;
+    broadcast.ip[13] = 0xFF;
+    broadcast.ip[14] = 0xFF;
+    broadcast.ip[15] = 0xFF;
+    broadcast.port = port;
+    ENetAddress to = address_to_enet(broadcast);
     return discover_to(host, &to);
 }
 
@@ -402,8 +416,7 @@ bool net_host_peer_address(const NetHost* host, uint32_t peer, NetAddress* addre
     {
         return false;
     }
-    address->host = host->enet->peers[peer].address.host;
-    address->port = host->enet->peers[peer].address.port;
+    *address = address_from_enet(&host->enet->peers[peer].address);
     return true;
 }
 
@@ -418,8 +431,17 @@ void net_host_disconnect(NetHost* host, uint32_t peer)
 
 bool net_address_from_text(const char* text, uint16_t port, NetAddress* address)
 {
+    // "[2001:db8::5]" as people write it next to a port: without the brackets.
+    char unbracketed[256];
+    size_t length = std::strlen(text);
+    if (length >= 2 && text[0] == '[' && text[length - 1] == ']' && length - 2 < sizeof(unbracketed))
+    {
+        std::memcpy(unbracketed, text + 1, length - 2);
+        unbracketed[length - 2] = '\0';
+        text = unbracketed;
+    }
     ENetAddress enet_address = {};
-    if (enet_address_set_host(&enet_address, text) != 0)
+    if (enet_address_set_host_new(&enet_address, text) != 0)
     {
         host_log(LogLevel::warning, "Network: unknown address \"%s\"", text);
         return false;
@@ -433,9 +455,28 @@ void net_address_to_text(NetAddress address, char* out, size_t capacity)
 {
     ENetAddress enet_address = address_to_enet(address);
     char ip[64] = {};
-    if (enet_address_get_host_ip(&enet_address, ip, sizeof(ip)) != 0)
+    // IPv4-mapped addresses come out as plain IPv4 ("192.168.1.20").
+    if (enet_address_get_host_ip_new(&enet_address, ip, sizeof(ip)) != 0)
     {
         std::snprintf(ip, sizeof(ip), "?");
     }
-    std::snprintf(out, capacity, "%s:%u", ip, static_cast<unsigned>(address.port));
+    if (net_address_is_ipv4(address))
+    {
+        std::snprintf(out, capacity, "%s:%u", ip, static_cast<unsigned>(address.port));
+    }
+    else
+    {
+        std::snprintf(out, capacity, "[%s]:%u", ip, static_cast<unsigned>(address.port));
+    }
+}
+
+bool net_address_is_ipv4(NetAddress address)
+{
+    static const uint8_t mapped_prefix[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
+    return std::memcmp(address.ip, mapped_prefix, sizeof(mapped_prefix)) == 0;
+}
+
+bool net_address_equal(NetAddress a, NetAddress b)
+{
+    return std::memcmp(a.ip, b.ip, sizeof(a.ip)) == 0 && a.port == b.port && a.scope == b.scope;
 }

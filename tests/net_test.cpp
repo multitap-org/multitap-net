@@ -15,7 +15,7 @@
 #include <string>
 #include <thread>
 
-#include <enet/enet.h>
+#include <enet.h>
 
 #include "net_discovery.h"
 #include "net_host.h"
@@ -183,7 +183,7 @@ static void test_loopback()
     // Garbage and a reply nobody asked for, on the listener's socket: both
     // must be ignored (no event, no crash).
     ENetAddress to = {};
-    to.host = address.host;
+    std::memcpy(&to.host, address.ip, sizeof(address.ip));
     to.port = port;
     uint8_t garbage[] = {'M', 'T', 'A', 'P', 9, 9, 9};
     ENetBuffer buffer = {};
@@ -219,6 +219,52 @@ static void test_loopback()
     check(pump_until(&loop, &loop.client_disconnected), "client saw the disconnect");
     check(loop.unexpected == 0, "no unexpected events");
 
+    net_host_destroy(&loop.client);
+    net_host_destroy(&loop.listener);
+}
+
+// IPv6: the text forms, and a connection over ::1 to the same dual-stack
+// listener that IPv4 peers reach (zpl-c's ENet).
+static void test_ipv6()
+{
+    NetAddress address;
+    char text[64];
+    check(net_address_from_text("2001:db8::5", 55420, &address), "IPv6 from text");
+    net_address_to_text(address, text, sizeof(text));
+    check(std::strcmp(text, "[2001:db8::5]:55420") == 0, "IPv6 to text, in brackets");
+    check(!net_address_is_ipv4(address), "IPv6 isn't IPv4");
+    NetAddress bracketed;
+    check(net_address_from_text("[2001:db8::5]", 55420, &bracketed), "IPv6 in brackets from text");
+    check(net_address_equal(address, bracketed), "brackets make no difference");
+    check(net_address_from_text("192.168.1.20", 7, &address), "IPv4 from text");
+    check(net_address_is_ipv4(address), "IPv4 is kept IPv4-mapped");
+    net_address_to_text(address, text, sizeof(text));
+    check(std::strcmp(text, "192.168.1.20:7") == 0, "IPv4 to text, plain");
+    check(!net_address_from_text("[2001:db8::5", 1, &address), "a lone bracket is refused");
+
+    Loopback loop;
+    if (!net_host_create_listener(&loop.listener, 0, "V6"))
+    {
+        check(false, "listener created");
+        return;
+    }
+    check(net_host_create_client(&loop.client), "client created");
+    uint16_t port = net_host_port(&loop.listener);
+    check(net_address_from_text("::1", port, &address), "::1 from text");
+    check(net_host_discover_at(&loop.client, address), "discovery over IPv6 sent");
+    check(pump_until(&loop, &loop.discovered), "discovery reply over IPv6");
+    uint32_t peer = NET_NO_PEER;
+    check(net_host_connect(&loop.client, address, &peer), "connect over IPv6 started");
+    check(pump_until(&loop, &loop.client_connected), "client connected over IPv6");
+    check(pump_until(&loop, &loop.listener_connected), "listener saw the IPv6 connection");
+    NetAddress seen;
+    check(net_host_peer_address(&loop.listener, loop.listener_peer, &seen), "listener knows the peer's address");
+    net_address_to_text(seen, text, sizeof(text));
+    check(std::strncmp(text, "[::1]:", 6) == 0, "the peer's address is ::1");
+    const uint8_t hello[] = {'h', 'e', 'l', 'l', 'o'};
+    check(net_host_send(&loop.client, peer, NetChannel::control, hello, sizeof(hello)), "send over IPv6");
+    check(pump_until(&loop, &loop.got_control), "message arrived over IPv6");
+    check(loop.unexpected == 0, "no unexpected events over IPv6");
     net_host_destroy(&loop.client);
     net_host_destroy(&loop.listener);
 }
@@ -730,6 +776,7 @@ int main(int argc, char** argv)
         return 1;
     }
     test_loopback();
+    test_ipv6();
     test_session();
     if (argc > 1)
     {

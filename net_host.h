@@ -23,7 +23,10 @@
 // Nothing here authenticates or encrypts yet (milestones 2-3): a frontend
 // must not act on what connected peers send until then.
 //
-// IPv4 only for now (upstream ENet); IPv6 is revisited with NAT traversal.
+// IPv6 and IPv4 on the same socket (zpl-c's ENet, dual-stack): a host listens
+// on both, and IPv4 peers show up as IPv4-mapped addresses (::ffff:a.b.c.d).
+// LAN discovery is IPv4 broadcast (every LAN has IPv4); IPv6 matters across
+// the internet, where it often avoids NAT altogether.
 
 #include <cstddef>
 #include <cstdint>
@@ -47,11 +50,13 @@ enum class NetChannel : uint8_t
 };
 constexpr uint8_t NET_CHANNEL_COUNT = 3;
 
-// IPv4 address and port. `host` is in network byte order, as ENet keeps it.
+// An address and port. IPv6, with IPv4 addresses kept IPv4-mapped
+// (::ffff:a.b.c.d), as the dual-stack socket sees them.
 struct NetAddress
 {
-    uint32_t host = 0;
+    uint8_t  ip[16] = {};   // network byte order
     uint16_t port = 0;
+    uint16_t scope = 0;     // the interface of a link-local address (fe80::...), else 0
 };
 
 enum class NetEventType
@@ -105,7 +110,7 @@ uint16_t net_host_port(const NetHost* host);
 // is queued too. Never blocks.
 bool net_host_poll(NetHost* host, NetEvent* event);
 
-// Client: ask every listener on the LAN (broadcast to 255.255.255.255:`port`),
+// Client: ask every listener on the LAN (IPv4 broadcast to 255.255.255.255:`port`),
 // or one address. Replies come back as `discovered` events.
 bool net_host_discover(NetHost* host, uint16_t port);
 bool net_host_discover_at(NetHost* host, NetAddress address);
@@ -131,7 +136,12 @@ bool net_host_peer_address(const NetHost* host, uint32_t peer, NetAddress* addre
 // Polite: queued data is sent first, then `disconnected` follows.
 void net_host_disconnect(NetHost* host, uint32_t peer);
 
-// "192.168.1.20" or a host name (resolved, may block) -> address.
+// "192.168.1.20", "2001:db8::5", "[2001:db8::5]", "fe80::1%wlan0" or a host
+// name (resolved, may block; the first address it has) -> address.
 bool net_address_from_text(const char* text, uint16_t port, NetAddress* address);
-// "192.168.1.20:55420".
+// "192.168.1.20:55420" for IPv4, "[2001:db8::5]:55420" for IPv6.
 void net_address_to_text(NetAddress address, char* out, size_t capacity);
+// An IPv4 address (IPv4-mapped).
+bool net_address_is_ipv4(NetAddress address);
+// Same ip, port and scope.
+bool net_address_equal(NetAddress a, NetAddress b);
