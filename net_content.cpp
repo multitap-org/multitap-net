@@ -32,6 +32,79 @@ static bool read_status(NetReader* reader, NetContentStatus* status)
 }
 
 // ---------------------------------------------------------------------------
+// Virtual paths
+// ---------------------------------------------------------------------------
+
+bool net_content_part_is_safe(const std::string* part)
+{
+    if (part->empty() || *part == "." || *part == "..")
+    {
+        return false;
+    }
+    for (size_t i = 0; i < part->size(); i++)
+    {
+        uint8_t c = static_cast<uint8_t>((*part)[i]);
+        if (c < 0x20 || c == 0x7F || c == '\\' || c == ':')
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+void net_content_split_path(const char* path, std::vector<std::string>* parts)
+{
+    parts->clear();
+    std::string part;
+    for (const char* cursor = path; *cursor != '\0'; cursor++)
+    {
+        if (*cursor == '/')
+        {
+            parts->push_back(part);
+            part.clear();
+        }
+        else
+        {
+            part.push_back(*cursor);
+        }
+    }
+    parts->push_back(part);
+}
+
+// The folder's own name: "/home/ana/roms/" -> "roms"; a root ("/", "C:/")
+// has none, so it's shown whole.
+std::string net_content_folder_name(const std::string* path)
+{
+    size_t end = path->size();
+    while (end > 0 && (*path)[end - 1] == '/')
+    {
+        end--;
+    }
+    size_t begin = end;
+    while (begin > 0 && (*path)[begin - 1] != '/')
+    {
+        begin--;
+    }
+    std::string name = path->substr(begin, end - begin);
+    if (name.empty() || name.find(':') != std::string::npos)
+    {
+        name = *path;   // "/" or "C:": not a name a path could hold; replaced below
+        for (size_t i = 0; i < name.size(); i++)
+        {
+            if (name[i] == '/' || name[i] == ':')
+            {
+                name[i] = '_';
+            }
+        }
+        if (name.empty())
+        {
+            name = "_";
+        }
+    }
+    return name;
+}
+
+// ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
 
