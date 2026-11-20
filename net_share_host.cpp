@@ -96,7 +96,7 @@ static void handle_put(NetShareHost* share, NetAccess* access, const NetAccessEv
     NetShareStatus status = NetShareStatus::busy;
     if (engine_free(share))
     {
-        status = net_share_begin_put(&share->folders, path.c_str(), file_size, flags, &target, &part, &offset);
+        status = net_share_begin_put(&share->folders, path.c_str(), file_size, mtime, flags, &target, &part, &offset);
         if (status == NetShareStatus::ok &&
             !net_share_engine_receive(&share->engine, id, part.c_str(), target.c_str(), file_size, mtime, offset))
         {

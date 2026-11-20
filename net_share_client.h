@@ -28,6 +28,7 @@ struct NetShareClientCopy
     std::string remote;             // virtual, in theirs
     uint8_t     flags = 0;          // NET_SHARE_PUT_REPLACE: an existing file may be replaced (either side)
     uint64_t    size = 0;           // a get: as listed (the host's get_ready must say the same)
+    uint64_t    mtime = 0;          // a get: as listed (a file of this size and date here already is `same`)
 };
 
 // A copy that ended, for the frontend to show.
@@ -90,7 +91,7 @@ bool net_share_client_listing(const NetShareClient* client, std::string* path, N
 
 // Queues a copy (its id is given here). Runs after the ones before it.
 uint32_t net_share_client_copy(NetShareClient* client, bool to_remote, const char* local, const char* remote,
-                               uint64_t size, uint8_t flags);
+                               uint64_t size, uint64_t mtime, uint8_t flags);
 // Stops the copy running and drops the queue.
 void net_share_client_cancel(NetShareClient* client);
 

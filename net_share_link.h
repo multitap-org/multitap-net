@@ -101,7 +101,7 @@ void     net_share_link_list(NetShareLink* link, const char* path);
 bool     net_share_link_listing(NetShareLink* link, std::string* path, NetShareStatus* status,
                                 std::vector<NetShareEntry>* entries);
 uint32_t net_share_link_copy(NetShareLink* link, bool to_remote, const char* local, const char* remote, uint64_t size,
-                             uint8_t flags);
+                             uint64_t mtime, uint8_t flags);
 void     net_share_link_cancel(NetShareLink* link);
 void     net_share_link_progress(NetShareLink* link, NetShareProgress* progress, NetShareClientCopy* copy,
                                  uint32_t* queued);

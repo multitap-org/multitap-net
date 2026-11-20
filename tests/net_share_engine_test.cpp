@@ -223,7 +223,7 @@ static bool begin_copy(NetShareFolders* folders, NetShareEngine* sender, NetShar
                        const std::string* source, uint64_t announced, const char* virtual_path, uint64_t mtime,
                        std::string* target, std::string* part, uint64_t* offset)
 {
-    if (net_share_begin_put(folders, virtual_path, announced, 0, target, part, offset) != NetShareStatus::ok)
+    if (net_share_begin_put(folders, virtual_path, announced, 0, 0, target, part, offset) != NetShareStatus::ok)
     {
         return false;
     }
@@ -408,7 +408,7 @@ int main(int argc, char** argv)
               "empty file copied");
         clear_both(&sender, &receiver);
 
-        check(net_share_begin_put(&folders, "games/order.bin", 100, 0, &target, &part, &offset) == NetShareStatus::ok &&
+        check(net_share_begin_put(&folders, "games/order.bin", 100, 0, 0, &target, &part, &offset) == NetShareStatus::ok &&
                   net_share_engine_receive(&receiver, 8, part.c_str(), target.c_str(), 100, 0, 0),
               "receiver for the order check");
         uint8_t bytes[10] = {};
