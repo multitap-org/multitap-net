@@ -8,6 +8,7 @@
 // Usage: frontend_net_share_folders_test <scratch folder>
 // Exit code 0 = all checks passed. Each failure is printed.
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -59,7 +60,8 @@ int main(int argc, char** argv)
     }
     // A folder of its own per run (the links and files of an earlier run stay
     // behind), canonical so paths compare with the roots'.
-    std::string run = std::string(argv[1]) + "/run-" + std::to_string(std::time(nullptr));
+    std::string run = std::string(argv[1]) + "/run-" + std::to_string(std::time(nullptr)) + "-" +
+                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     char canonical_base[4096] = {};
     if (!host_fs_make_directories(run.c_str()) || !host_fs_canonical(run.c_str(), canonical_base, sizeof(canonical_base)))
     {
