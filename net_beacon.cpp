@@ -361,7 +361,7 @@ bool net_beacon_host_receive(NetBeaconHost* beacon, NetHost* host, const BeaconM
         server->last_heard = now;
         send_registers(beacon, host, server);
         return true;
-    case BeaconType::REGISTERED:
+    case BeaconType::REGISTERED_REPLY:
         if (secondary || message->nonce != server->nonce)
         {
             return false;
