@@ -9,6 +9,10 @@
 //   client -> host  speed_request  id u32 | direction u8 | rate kbit/s u32 | duration ms u32
 //   host -> client  speed_report   id u32 | direction u8 | packets u32 | bytes u64 | seconds (text)
 //   either way      speed_data     (input channel) type 3 | id u32 | seq u32 | filler
+//   client -> host  speed_result   direction u8 | asked kbit/s u32 | got kbit/s u32 | loss per mille u16
+//
+// speed_result: what the client made of one step (it alone knows both
+// halves of a down test), so the host can show it too.
 //
 // Down (piccolo -> phone): the host sends at the asked rate for the asked
 // time, then reports how many packets it sent; the client compares with
@@ -27,6 +31,7 @@
 
 constexpr uint8_t  NET_SPEED_REQUEST = 64;   // control, client -> host
 constexpr uint8_t  NET_SPEED_REPORT = 65;    // control, host -> client
+constexpr uint8_t  NET_SPEED_RESULT = 66;    // control, client -> host
 constexpr uint8_t  NET_INPUT_TYPE_SPEED = 3; // input channel
 constexpr uint32_t NET_SPEED_MAX_KBPS = 200000;      // 200 Mbit/s
 constexpr uint32_t NET_SPEED_MAX_MS = 5000;
@@ -56,6 +61,17 @@ bool   net_speed_read_request(const uint8_t* data, size_t size, uint32_t* id, Ne
                               uint32_t* rate_kbps, uint32_t* duration_ms);
 size_t net_speed_write_report(uint8_t* out, size_t capacity, const NetSpeedReport* report);
 bool   net_speed_read_report(const uint8_t* data, size_t size, NetSpeedReport* report);
+
+struct NetSpeedResult
+{
+    NetSpeedDirection direction = NetSpeedDirection::down;
+    uint32_t          asked_kbps = 0;
+    uint32_t          got_kbps = 0;
+    uint16_t          loss_per_mille = 0;   // 0..1000
+};
+
+size_t net_speed_write_result(uint8_t* out, size_t capacity, const NetSpeedResult* result);
+bool   net_speed_read_result(const uint8_t* data, size_t size, NetSpeedResult* result);
 
 // --- sending ------------------------------------------------------------------
 

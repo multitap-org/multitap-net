@@ -42,9 +42,10 @@ constexpr uint32_t NET_MAX_DISCOVERED = 16;   // replies kept between two polls;
 enum class NetChannel : uint8_t
 {
     control = 0,
-    input = 1,
+    input = 1,    // unreliable, sequenced: pads, test packets
+    stream = 2,   // unreliable, sequenced: remote play's frames and audio (net_stream.h)
 };
-constexpr uint8_t NET_CHANNEL_COUNT = 2;
+constexpr uint8_t NET_CHANNEL_COUNT = 3;
 
 // IPv4 address and port. `host` is in network byte order, as ENet keeps it.
 struct NetAddress
@@ -125,6 +126,7 @@ struct NetLinkStats
 
 // False if `peer` isn't connected.
 bool net_host_peer_stats(const NetHost* host, uint32_t peer, NetLinkStats* stats);
+bool net_host_peer_address(const NetHost* host, uint32_t peer, NetAddress* address);
 
 // Polite: queued data is sent first, then `disconnected` follows.
 void net_host_disconnect(NetHost* host, uint32_t peer);

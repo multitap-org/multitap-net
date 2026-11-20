@@ -49,6 +49,20 @@ int main()
               read.packets == 1234 && read.bytes == report.bytes && std::fabs(read.seconds - 0.987654) < 1e-6,
           "report read");
 
+    NetSpeedResult result;
+    result.direction = NetSpeedDirection::up;
+    result.asked_kbps = 50000;
+    result.got_kbps = 49000;
+    result.loss_per_mille = 20;
+    NetSpeedResult result_read;
+    size = net_speed_write_result(out, sizeof(out), &result);
+    check(net_speed_read_result(out, size, &result_read) && result_read.direction == NetSpeedDirection::up &&
+              result_read.asked_kbps == 50000 && result_read.got_kbps == 49000 && result_read.loss_per_mille == 20,
+          "result read");
+    out[size - 2] = 0xFF;   // loss over 1000
+    out[size - 1] = 0xFF;
+    check(!net_speed_read_result(out, size, &result_read), "a loss over 100% refused");
+
     // 9.6 Mbit/s = 1000 packets of 1200 bytes a second, for one second,
     // called at 60 Hz: 1000 packets in all, about 16-17 a call.
     NetSpeedSender sender;

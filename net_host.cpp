@@ -395,6 +395,18 @@ bool net_host_peer_stats(const NetHost* host, uint32_t peer, NetLinkStats* stats
     return true;
 }
 
+bool net_host_peer_address(const NetHost* host, uint32_t peer, NetAddress* address)
+{
+    if (host->enet == nullptr || peer >= host->enet->peerCount ||
+        host->enet->peers[peer].state != ENET_PEER_STATE_CONNECTED)
+    {
+        return false;
+    }
+    address->host = host->enet->peers[peer].address.host;
+    address->port = host->enet->peers[peer].address.port;
+    return true;
+}
+
 void net_host_disconnect(NetHost* host, uint32_t peer)
 {
     ENetPeer* enet_peer = peer_get(host, peer);
