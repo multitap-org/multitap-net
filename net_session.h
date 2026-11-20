@@ -38,6 +38,7 @@ enum class NetSessionEventType
     secured,      // handshake done: `peer`, `remote_key`, `handshake_hash`
     message,      // `data`/`size` on `channel` from a secured `peer`
     closed,       // `peer` is gone (`was_secured`: whether `secured` was ever reported)
+    beacon,       // a beacon message (`beacon`, from `address`; net_beacon.h)
 };
 
 struct NetSessionEvent
@@ -52,6 +53,7 @@ struct NetSessionEvent
     uint8_t        remote_key[NET_KEY_SIZE] = {};
     uint8_t        handshake_hash[NET_HASH_SIZE] = {};
     NetDiscoveryReply discovered;
+    BeaconMessage  beacon;
 };
 
 struct NetSession

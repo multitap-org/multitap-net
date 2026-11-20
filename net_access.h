@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "net_beacon.h"
 #include "net_pairing.h"
 #include "net_session.h"
 #include "net_trust.h"
@@ -91,6 +92,7 @@ struct NetAccess
     uint32_t      dropped_by_access = 0;   // messages a device's level didn't cover
     NetAccessPeer peers[NET_MAX_PEERS];
     std::vector<uint8_t> out;        // messages we write (sized at creation)
+    NetBeaconHost beacon;            // across the internet (off until net_access_set_beacon)
 };
 
 // `trust_path`: the paired devices file (loaded now, saved on every change).
@@ -122,3 +124,8 @@ bool net_access_peer_stats(const NetAccess* access, uint32_t peer, NetLinkStats*
 bool net_access_peer_address(const NetAccess* access, uint32_t peer, NetAddress* address);
 // Is this peer connected and authorized as that device?
 bool net_access_device_connected(const NetAccess* access, uint32_t device);
+
+// Paired devices may reach this host across the internet through a beacon
+// (net_beacon.h): `servers` = its addresses (net_address_resolve), count 0 = off.
+void net_access_set_beacon(NetAccess* access, const NetAddress* servers, uint32_t count);
+NetBeaconStatus net_access_beacon_status(const NetAccess* access);

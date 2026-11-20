@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "net_beacon.h"
 #include "net_pairing.h"
 #include "net_session.h"
 #include "net_trust.h"
@@ -22,6 +23,7 @@
 enum class NetClientState
 {
     idle,
+    meeting,      // across the internet: asking the beacon, punching (net_beacon.h)
     connecting,   // ENet + Noise handshake
     waiting,      // secured, waiting for welcome / pairing_needed
     pairing,      // pair_request sent
@@ -37,6 +39,9 @@ enum class NetClientRefusal
     wrong_code,       // the code didn't match (or the pairing was refused)
     unknown_host,     // it welcomed us but its key isn't one we paired with
     connection,       // the connection failed or dropped
+    beacon_unreachable,   // across the internet: no beacon server answered
+    host_offline,     // across the internet: the beacon doesn't know the host (not running, internet off there)
+    no_route,         // across the internet: the beacon introduced us, but no path got through the NATs
 };
 
 enum class NetClientEventType
@@ -81,6 +86,8 @@ struct NetClient
     int32_t        device = -1;
     NetAccessLevel access = NetAccessLevel::gamepad;
     std::vector<uint8_t> out;
+    NetBeaconClient beacon;
+    bool           via_beacon = false;   // this connection went through the beacon
 };
 
 bool net_client_create(NetClient* client, const NetKeypair* identity, const char* name, const char* trust_path);
@@ -89,6 +96,10 @@ void net_client_destroy(NetClient* client);
 // `code` = the 6 digits the host shows, or nullptr to connect as an already
 // paired device.
 bool net_client_connect(NetClient* client, NetAddress address, const char* code);
+// Across the internet: to the host at `device` in our paired list, through a
+// beacon (`servers`: its addresses, net_address_resolve). `ready` or `refused`
+// follows as with net_client_connect; pairing needs the LAN.
+bool net_client_connect_beacon(NetClient* client, const NetAddress* servers, uint32_t count, uint32_t device);
 bool net_client_poll(NetClient* client, NetClientEvent* event);
 // Only when ready. A control payload starts with its type (NET_MESSAGE_FIRST_APP or above).
 bool net_client_send(NetClient* client, NetChannel channel, const uint8_t* data, size_t size);

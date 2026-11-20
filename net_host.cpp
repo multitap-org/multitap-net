@@ -1,6 +1,7 @@
 #include "net_host.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 
@@ -101,6 +102,20 @@ static int ENET_CALLBACK intercept(ENetHost* enet, void* event)
             }
         }
         return 1;   // a client ignores other clients' requests
+    }
+
+    // A beacon message: exactly one of beacon_wire's fixed layouts ("MTBC"),
+    // checked whole by beacon_decode; queued for net_beacon (listener or client).
+    BeaconMessage beacon;
+    if (beacon_decode(data, size, &beacon))
+    {
+        if (host->beacon_count < NET_MAX_BEACON_QUEUED)
+        {
+            host->beacon_queue[host->beacon_count] = beacon;
+            host->beacon_from[host->beacon_count] = address_from_enet(&enet->receivedAddress);
+            host->beacon_count++;
+        }
+        return 1;
     }
 
     NetDiscoveryReply reply;
@@ -247,6 +262,24 @@ static bool take_discovered(NetHost* host, NetEvent* event)
     return true;
 }
 
+static bool take_beacon(NetHost* host, NetEvent* event)
+{
+    if (host->beacon_count == 0)
+    {
+        return false;
+    }
+    event->type = NetEventType::beacon;
+    event->beacon = host->beacon_queue[0];
+    event->address = host->beacon_from[0];
+    for (uint32_t i = 1; i < host->beacon_count; i++)
+    {
+        host->beacon_queue[i - 1] = host->beacon_queue[i];
+        host->beacon_from[i - 1] = host->beacon_from[i];
+    }
+    host->beacon_count--;
+    return true;
+}
+
 bool net_host_poll(NetHost* host, NetEvent* event)
 {
     *event = {};
@@ -259,7 +292,7 @@ bool net_host_poll(NetHost* host, NetEvent* event)
     {
         return false;
     }
-    if (take_discovered(host, event))
+    if (take_discovered(host, event) || take_beacon(host, event))
     {
         return true;
     }
@@ -276,7 +309,7 @@ bool net_host_poll(NetHost* host, NetEvent* event)
     if (result == 0)
     {
         // The intercept may have queued replies during this call.
-        return take_discovered(host, event);
+        return take_discovered(host, event) || take_beacon(host, event);
     }
 
     event->peer = peer_index(host, enet_event.peer);
@@ -342,6 +375,16 @@ bool net_host_discover_at(NetHost* host, NetAddress address)
 {
     ENetAddress to = address_to_enet(address);
     return discover_to(host, &to);
+}
+
+bool net_host_send_datagram(NetHost* host, NetAddress to, const uint8_t* data, size_t size)
+{
+    if (host->enet == nullptr)
+    {
+        return false;
+    }
+    ENetAddress enet_to = address_to_enet(to);
+    return send_raw(host->enet, &enet_to, const_cast<uint8_t*>(data), size);
 }
 
 bool net_host_connect(NetHost* host, NetAddress address, uint32_t* peer)
@@ -479,4 +522,102 @@ bool net_address_is_ipv4(NetAddress address)
 bool net_address_equal(NetAddress a, NetAddress b)
 {
     return std::memcmp(a.ip, b.ip, sizeof(a.ip)) == 0 && a.port == b.port && a.scope == b.scope;
+}
+
+uint32_t net_address_resolve(const char* text, uint16_t default_port, NetAddress* out)
+{
+    // Split "name:port", "[v6]:port", "[v6]", "v6" (more than one ':' and no
+    // brackets: all address) and "name".
+    char name[256];
+    uint16_t port = default_port;
+    size_t length = std::strlen(text);
+    if (length == 0 || length >= sizeof(name))
+    {
+        return 0;
+    }
+    const char* port_text = nullptr;
+    if (text[0] == '[')
+    {
+        const char* close = std::strchr(text, ']');
+        if (close == nullptr)
+        {
+            return 0;
+        }
+        size_t name_length = static_cast<size_t>(close - text - 1);
+        std::memcpy(name, text + 1, name_length);
+        name[name_length] = '\0';
+        if (close[1] == ':')
+        {
+            port_text = close + 2;
+        }
+        else if (close[1] != '\0')
+        {
+            return 0;
+        }
+    }
+    else
+    {
+        const char* colon = std::strchr(text, ':');
+        if (colon != nullptr && std::strchr(colon + 1, ':') == nullptr)
+        {
+            size_t name_length = static_cast<size_t>(colon - text);
+            std::memcpy(name, text, name_length);
+            name[name_length] = '\0';
+            port_text = colon + 1;
+        }
+        else
+        {
+            std::memcpy(name, text, length + 1);
+        }
+    }
+    if (port_text != nullptr)
+    {
+        char* end = nullptr;
+        unsigned long value = std::strtoul(port_text, &end, 10);
+        if (*port_text == '\0' || *end != '\0' || value == 0 || value > 65535)
+        {
+            return 0;
+        }
+        port = static_cast<uint16_t>(value);
+    }
+
+    addrinfo hints = {};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    addrinfo* list = nullptr;
+    if (getaddrinfo(name, nullptr, &hints, &list) != 0)
+    {
+        host_log(LogLevel::warning, "Network: unknown server \"%s\"", name);
+        return 0;
+    }
+    bool have_ipv4 = false;
+    bool have_ipv6 = false;
+    uint32_t count = 0;
+    for (addrinfo* item = list; item != nullptr && count < 2; item = item->ai_next)
+    {
+        NetAddress address;
+        if (item->ai_family == AF_INET && !have_ipv4)
+        {
+            const sockaddr_in* v4 = reinterpret_cast<const sockaddr_in*>(item->ai_addr);
+            address.ip[10] = 0xFF;
+            address.ip[11] = 0xFF;
+            std::memcpy(address.ip + 12, &v4->sin_addr, 4);
+            have_ipv4 = true;
+        }
+        else if (item->ai_family == AF_INET6 && !have_ipv6)
+        {
+            const sockaddr_in6* v6 = reinterpret_cast<const sockaddr_in6*>(item->ai_addr);
+            std::memcpy(address.ip, &v6->sin6_addr, 16);
+            address.scope = static_cast<uint16_t>(v6->sin6_scope_id);
+            have_ipv6 = true;
+        }
+        else
+        {
+            continue;
+        }
+        address.port = port;
+        out[count++] = address;
+    }
+    freeaddrinfo(list);
+    return count;
 }

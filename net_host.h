@@ -2,7 +2,8 @@
 
 // One UDP port for everything network: ENet (deps/enet, MIT) for connections
 // with a reliable and an unreliable channel, and our own datagrams on the same
-// socket (LAN discovery today, STUN later) picked out before ENet sees them.
+// socket (LAN discovery, the beacon's messages: net_beacon.h) picked out
+// before ENet sees them.
 //
 // ENet stays behind this module: nothing else includes enet.h. No SDL either,
 // so a headless piccolo or a host process could use it as it is.
@@ -32,6 +33,7 @@
 #include <cstdint>
 #include <string>
 
+#include "beacon_wire.h"
 #include "net_discovery.h"
 
 struct _ENetHost;
@@ -41,6 +43,7 @@ constexpr uint16_t NET_DEFAULT_PORT = 55420;
 constexpr uint32_t NET_MAX_PEERS = 8;
 constexpr uint32_t NET_NO_PEER = UINT32_MAX;
 constexpr uint32_t NET_MAX_DISCOVERED = 16;   // replies kept between two polls; more are dropped
+constexpr uint32_t NET_MAX_BEACON_QUEUED = 16;   // beacon messages kept between two polls; more are dropped
 
 enum class NetChannel : uint8_t
 {
@@ -66,6 +69,7 @@ enum class NetEventType
     disconnected,   // a peer left or timed out; `peer` is free again
     received,       // `data`/`size` on `channel`, from `peer`
     discovered,     // a discovery reply (`discovered`, from `address`)
+    beacon,         // a beacon message (`beacon`, from `address`): from a beacon server or a PUNCH from a peer
 };
 
 struct NetEvent
@@ -77,6 +81,7 @@ struct NetEvent
     const uint8_t* data = nullptr;     // received: valid until the next net_host_poll
     size_t       size = 0;
     NetDiscoveryReply discovered;
+    BeaconMessage  beacon;
 };
 
 struct NetHost
@@ -90,6 +95,9 @@ struct NetHost
     NetAddress  discovered_from[NET_MAX_DISCOVERED];
     uint32_t    discovered_count = 0;
     uint32_t    discovery_requests_answered = 0;
+    BeaconMessage beacon_queue[NET_MAX_BEACON_QUEUED];
+    NetAddress  beacon_from[NET_MAX_BEACON_QUEUED];
+    uint32_t    beacon_count = 0;
 };
 
 // ENet's global setup (WSAStartup on Windows). Counted: each successful
@@ -114,6 +122,10 @@ bool net_host_poll(NetHost* host, NetEvent* event);
 // or one address. Replies come back as `discovered` events.
 bool net_host_discover(NetHost* host, uint16_t port);
 bool net_host_discover_at(NetHost* host, NetAddress address);
+
+// One datagram of our own (a beacon message) on the host's socket, outside
+// ENet: what NAT traversal needs (the beacon must see the socket ENet uses).
+bool net_host_send_datagram(NetHost* host, NetAddress to, const uint8_t* data, size_t size);
 
 // Starts connecting; `connected` (or `disconnected`) follows from net_host_poll.
 bool net_host_connect(NetHost* host, NetAddress address, uint32_t* peer);
@@ -145,3 +157,9 @@ void net_address_to_text(NetAddress address, char* out, size_t capacity);
 bool net_address_is_ipv4(NetAddress address);
 // Same ip, port and scope.
 bool net_address_equal(NetAddress a, NetAddress b);
+
+// A server name as people write it: "beacon.example.org", "beacon.example.org:55430",
+// "203.0.113.5", "[2001:db8::5]:55430". Resolves it (blocks: DNS) to at most one
+// IPv4 and one IPv6 address (`out` holds 2), `default_port` when none is given.
+// Returns how many addresses it found (0 = unknown name or bad text).
+uint32_t net_address_resolve(const char* text, uint16_t default_port, NetAddress* out);

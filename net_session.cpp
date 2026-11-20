@@ -183,6 +183,11 @@ bool net_session_poll(NetSession* session, NetSessionEvent* event)
             event->address = net.address;
             event->discovered = net.discovered;
             return true;
+        case NetEventType::beacon:
+            event->type = NetSessionEventType::beacon;
+            event->address = net.address;
+            event->beacon = net.beacon;
+            return true;
         case NetEventType::connected:
             on_connected(session, &net);
             break;
