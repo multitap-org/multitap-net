@@ -4,7 +4,9 @@
 // it, offers, and the encrypted blobs go through the beacon; the data
 // channels connect and the Noise handshake runs on them (each side sees the
 // other's device key). Then a client whose host isn't there (host_offline)
-// and one pointed at no beacon at all (unreachable).
+// and one pointed at no beacon at all (unreachable). Last, the whole flow
+// with NetAccess and NetClient: a host with only signaling (like a browser),
+// net_client_connect_beacon with no UDP servers, ready on both sides.
 
 #include <chrono>
 #include <csignal>
@@ -17,6 +19,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "host_fs.h"
+#include "net_access.h"
+#include "net_client.h"
 #include "net_session.h"
 #include "net_signal.h"
 
@@ -94,11 +99,13 @@ static bool pump_until_failure(Side* host, Side* client, int milliseconds)
 
 int main(int argc, char** argv)
 {
-    if (argc < 2)
+    if (argc < 3)
     {
-        std::printf("FAIL no beacon binary given\n");
+        std::printf("FAIL usage: net_signal_test <beacon binary> <scratch folder>\n");
         return 1;
     }
+    std::string dir = argv[2];
+    host_fs_make_directories(argv[2]);
     check(net_signal_url("beacon.get-piccolo.app") == "wss://beacon.get-piccolo.app/signal", "signaling URL from a name");
     check(net_signal_url("beacon.example.org:55430") == "wss://beacon.example.org/signal", "the UDP port isn't kept");
     check(net_signal_stun("beacon.get-piccolo.app") == "stun:beacon.get-piccolo.app:55430", "STUN URL from a name");
@@ -183,6 +190,102 @@ int main(int argc, char** argv)
     net_session_destroy(&host->session);
     delete client;
     delete host;
+
+    // The whole flow: NetAccess (signaling only) and NetClient.
+    std::string host_devices = dir + "/host_devices.cfg";
+    std::string client_hosts = dir + "/client_hosts.cfg";
+    NetTrust trust;
+    net_trust_add(&trust, client_key.public_key, "PHONE");
+    net_trust_save(&trust, host_devices.c_str());
+    NetTrust hosts;
+    net_trust_add(&hosts, host_key.public_key, "LIVING ROOM");
+    net_trust_save(&hosts, client_hosts.c_str());
+    NetAccess* access = new NetAccess();
+    NetClient* phone = new NetClient();
+    check(net_access_create(access, 0, "LIVING ROOM", &host_key, host_devices.c_str()), "access created");
+    check(net_access_set_signal(access, url.c_str(), nullptr), "access signals");
+    check(net_client_create(phone, &client_key, "PHONE", client_hosts.c_str()), "client created");
+    net_client_set_signal(phone, url.c_str(), nullptr);
+    bool access_ready = false;
+    for (int i = 0; i < 400 && !access_ready; i++)
+    {
+        NetAccessEvent ignored;
+        while (net_access_poll(access, &ignored))
+        {
+        }
+        access_ready = net_access_signal_status(access) == NetSignalStatus::ready;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    check(access_ready, "access in its rooms");
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    check(net_client_connect_beacon(phone, nullptr, 0, 0), "client meets through signaling only");
+    bool phone_ready = false;
+    bool access_authorized = false;
+    for (int i = 0; i < 3000 && !(phone_ready && access_authorized); i++)
+    {
+        NetAccessEvent access_event;
+        while (net_access_poll(access, &access_event))
+        {
+            access_authorized = access_authorized || access_event.type == NetAccessEventType::authorized;
+        }
+        NetClientEvent phone_event;
+        while (net_client_poll(phone, &phone_event))
+        {
+            phone_ready = phone_ready || phone_event.type == NetClientEventType::ready;
+            if (phone_event.type == NetClientEventType::refused)
+            {
+                std::printf("refused %d\n", static_cast<int>(phone_event.refusal));
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    check(phone_ready, "client ready (WebRTC, the paired host)");
+    check(access_authorized, "host authorized the paired device");
+    check(net_host_peer_transport(&phone->session.host, phone->peer) == NetTransport::rtc, "over WebRTC");
+
+    // UDP first, then WebRTC: the beacon's UDP side doesn't know this host
+    // (it only signals), so MEET gets NOT_FOUND and the client goes on to
+    // signaling by itself. One flow, whatever the transport.
+    net_client_close(phone);
+    bool phone_closed = false;
+    for (int i = 0; i < 2000 && !phone_closed; i++)
+    {
+        NetAccessEvent ignored;
+        while (net_access_poll(access, &ignored))
+        {
+        }
+        NetClientEvent phone_event;
+        while (net_client_poll(phone, &phone_event))
+        {
+            phone_closed = phone_closed || phone_event.type == NetClientEventType::closed;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    check(phone_closed, "client closed");
+    NetAddress udp;
+    net_address_from_text("127.0.0.1", port, &udp);
+    check(net_client_connect_beacon(phone, &udp, 1, 0), "client meets through UDP first");
+    phone_ready = false;
+    bool refused = false;
+    for (int i = 0; i < 4000 && !phone_ready && !refused; i++)
+    {
+        NetAccessEvent ignored;
+        while (net_access_poll(access, &ignored))
+        {
+        }
+        NetClientEvent phone_event;
+        while (net_client_poll(phone, &phone_event))
+        {
+            phone_ready = phone_ready || phone_event.type == NetClientEventType::ready;
+            refused = refused || phone_event.type == NetClientEventType::refused;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    check(phone_ready && phone->via_signal, "UDP didn't find it; WebRTC did (ready)");
+    net_client_destroy(phone);
+    net_access_destroy(access);
+    delete phone;
+    delete access;
     net_shutdown();
 
     kill(beacon, SIGTERM);

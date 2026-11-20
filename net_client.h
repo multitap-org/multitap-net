@@ -17,6 +17,7 @@
 
 #include "net_beacon.h"
 #include "net_pairing.h"
+#include "net_signal.h"
 #include "net_session.h"
 #include "net_trust.h"
 
@@ -88,6 +89,13 @@ struct NetClient
     std::vector<uint8_t> out;
     NetBeaconClient beacon;
     bool           via_beacon = false;   // this connection went through the beacon
+    // WebRTC through the beacon's signaling (net_signal.h): the hosts that
+    // are browsers, or when UDP didn't get through.
+    NetSignal      signal;
+    std::string    signal_url;           // "" = no signaling (net_client_set_signal)
+    std::string    signal_stun;
+    bool           via_signal = false;   // this connection is WebRTC, signaled by the beacon
+    uint32_t       beacon_device = 0;    // the host being met (its index in our list)
 };
 
 bool net_client_create(NetClient* client, const NetKeypair* identity, const char* name, const char* trust_path);
@@ -99,7 +107,12 @@ bool net_client_connect(NetClient* client, NetAddress address, const char* code)
 // Across the internet: to the host at `device` in our paired list, through a
 // beacon (`servers`: its addresses, net_address_resolve). `ready` or `refused`
 // follows as with net_client_connect; pairing needs the LAN.
+// The same flow whatever the transport (Andrés): UDP first (hole punching);
+// if that fails (or `count` is 0, as in a browser) and signaling is set,
+// WebRTC through the beacon's signaling. The refusals are the same either way.
 bool net_client_connect_beacon(NetClient* client, const NetAddress* servers, uint32_t count, uint32_t device);
+// The beacon's signaling (net_signal_url / net_signal_stun); "" = none.
+void net_client_set_signal(NetClient* client, const char* url, const char* stun);
 bool net_client_poll(NetClient* client, NetClientEvent* event);
 // Only when ready. A control payload starts with its type (NET_MESSAGE_FIRST_APP or above).
 bool net_client_send(NetClient* client, NetChannel channel, const uint8_t* data, size_t size);

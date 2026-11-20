@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "net_beacon.h"
+#include "net_signal.h"
 #include "net_pairing.h"
 #include "net_session.h"
 #include "net_trust.h"
@@ -93,6 +94,7 @@ struct NetAccess
     NetAccessPeer peers[NET_MAX_PEERS];
     std::vector<uint8_t> out;        // messages we write (sized at creation)
     NetBeaconHost beacon;            // across the internet (off until net_access_set_beacon)
+    NetSignal     signal;            // WebRTC signaling, for browsers (off until net_access_set_signal)
 };
 
 // `trust_path`: the paired devices file (loaded now, saved on every change).
@@ -131,3 +133,7 @@ bool net_access_device_connected(const NetAccess* access, uint32_t device);
 // (net_beacon.h): `servers` = its addresses (net_address_resolve), count 0 = off.
 void net_access_set_beacon(NetAccess* access, const NetAddress* servers, uint32_t count);
 NetBeaconStatus net_access_beacon_status(const NetAccess* access);
+// Browsers too (WebRTC): the beacon's signaling `url` (net_signal_url) and its
+// STUN (net_signal_stun); "" turns it off. False if this build has no WebRTC.
+bool net_access_set_signal(NetAccess* access, const char* url, const char* stun);
+NetSignalStatus net_access_signal_status(const NetAccess* access);

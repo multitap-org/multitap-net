@@ -38,6 +38,7 @@ void net_access_destroy(NetAccess* access)
         peer_reset(&access->peers[i]);
     }
     net_access_close_pairing(access);
+    net_signal_stop(&access->signal);
     net_session_destroy(&access->session);
 }
 
@@ -63,6 +64,15 @@ static void beacon_refresh_ids(NetAccess* access)
     if (!same)
     {
         net_beacon_host_set_ids(&access->beacon, ids.data(), static_cast<uint32_t>(ids.size()));
+        // The same pairings as signaling rooms (WebRTC: browsers).
+        std::vector<uint8_t> keys(access->trust.devices.size() * NET_KEY_SIZE);
+        for (size_t i = 0; i < access->trust.devices.size(); i++)
+        {
+            std::memcpy(&keys[i * NET_KEY_SIZE], access->trust.devices[i].key, NET_KEY_SIZE);
+        }
+        net_signal_host_set_rooms(&access->signal, &access->session.identity,
+                                  reinterpret_cast<const uint8_t(*)[NET_KEY_SIZE]>(keys.data()),
+                                  static_cast<uint32_t>(access->trust.devices.size()));
     }
 }
 
@@ -436,6 +446,7 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
 {
     *event = {};
     net_beacon_host_update(&access->beacon, &access->session.host, net_seconds());
+    net_signal_update(&access->signal, &access->session, net_seconds());
     if (check_timers(access, event))
     {
         return true;
@@ -448,7 +459,9 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
         {
         case NetSessionEventType::none:
         case NetSessionEventType::discovered:
-        case NetSessionEventType::signal:   // WebRTC signaling: carried by the beacon (next step)
+            break;
+        case NetSessionEventType::signal:   // WebRTC: our blob, to the device through the beacon
+            net_signal_outgoing(&access->signal, session_event.peer, session_event.data, session_event.size);
             break;
         case NetSessionEventType::beacon:
             net_beacon_host_receive(&access->beacon, &access->session.host, &session_event.beacon,
@@ -466,6 +479,7 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
             {
                 break;
             }
+            net_signal_peer_gone(&access->signal, session_event.peer);
             NetAccessPeer* peer = &access->peers[session_event.peer];
             NetAccessPeerState state = peer->state;
             int32_t device = peer->device;
@@ -586,4 +600,26 @@ NetBeaconStatus net_access_beacon_status(const NetAccess* access)
 size_t net_access_peer_pending(const NetAccess* access, uint32_t peer)
 {
     return net_host_peer_pending(&access->session.host, peer);
+}
+
+bool net_access_set_signal(NetAccess* access, const char* url, const char* stun)
+{
+    if (url == nullptr || url[0] == '\0')
+    {
+        net_signal_host_start(&access->signal, "");
+        return true;
+    }
+    if (!net_session_enable_rtc(&access->session, stun))
+    {
+        return false;   // no WebRTC in this build
+    }
+    net_signal_host_start(&access->signal, url);
+    access->beacon.ids.clear();   // computed again: the rooms come with them
+    beacon_refresh_ids(access);
+    return true;
+}
+
+NetSignalStatus net_access_signal_status(const NetAccess* access)
+{
+    return net_signal_status(&access->signal, net_seconds());
 }

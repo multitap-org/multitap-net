@@ -30,6 +30,7 @@ static void forget_secrets(NetClient* client)
 void net_client_destroy(NetClient* client)
 {
     forget_secrets(client);
+    net_signal_stop(&client->signal);
     net_session_destroy(&client->session);
 }
 
@@ -60,6 +61,29 @@ bool net_client_connect(NetClient* client, NetAddress address, const char* code)
 
 static void refuse(NetClient* client, NetClientRefusal refusal, bool we_close, NetClientEvent* event);
 
+void net_client_set_signal(NetClient* client, const char* url, const char* stun)
+{
+    client->signal_url = url != nullptr ? url : "";
+    client->signal_stun = stun != nullptr ? stun : "";
+}
+
+// WebRTC through the beacon's signaling, for the host being met.
+static bool start_signal(NetClient* client)
+{
+    if (client->signal_url.empty() || client->via_signal ||
+        !net_session_enable_rtc(&client->session, client->signal_stun.empty() ? nullptr : client->signal_stun.c_str()) ||
+        !net_signal_client_start(&client->signal, client->signal_url.c_str(), &client->session.identity,
+                                 client->trust.devices[client->beacon_device].key, net_seconds()))
+    {
+        return false;
+    }
+    host_log(LogLevel::info, "Network: trying WebRTC through the beacon's signaling");
+    client->via_signal = true;
+    client->peer = NET_NO_PEER;
+    client->state = NetClientState::meeting;
+    return true;
+}
+
 bool net_client_connect_beacon(NetClient* client, const NetAddress* servers, uint32_t count, uint32_t device)
 {
     if (client->state != NetClientState::idle || device >= client->trust.devices.size())
@@ -67,16 +91,48 @@ bool net_client_connect_beacon(NetClient* client, const NetAddress* servers, uin
         return false;
     }
     forget_secrets(client);
+    client->beacon_device = device;
+    client->via_signal = false;
+    client->peer = NET_NO_PEER;
     BeaconId id;
-    if (!net_beacon_meeting_id(&client->session.identity, client->trust.devices[device].key, &id) ||
-        !net_beacon_client_start(&client->beacon, servers, count, &id, net_seconds()))
+    if (count > 0 && net_beacon_meeting_id(&client->session.identity, client->trust.devices[device].key, &id) &&
+        net_beacon_client_start(&client->beacon, servers, count, &id, net_seconds()))
+    {
+        client->via_beacon = true;
+        client->state = NetClientState::meeting;
+        return true;
+    }
+    client->via_beacon = true;   // the beacon all the same: its signaling
+    return start_signal(client);
+}
+
+// The signaling side of a meeting: the client's WebRTC peer once it offered,
+// or a refusal. True if `event` was filled.
+static bool signal_step(NetClient* client, NetClientEvent* event)
+{
+    if (!client->via_signal)
     {
         return false;
     }
-    client->peer = NET_NO_PEER;
-    client->via_beacon = true;
-    client->state = NetClientState::meeting;
-    return true;
+    net_signal_update(&client->signal, &client->session, net_seconds());
+    if (client->state != NetClientState::meeting)
+    {
+        return false;
+    }
+    if (client->signal.failure != NetSignalFailure::none)
+    {
+        refuse(client, client->signal.failure == NetSignalFailure::host_offline ? NetClientRefusal::host_offline
+                                                                                 : NetClientRefusal::beacon_unreachable,
+               false, event);
+        return true;
+    }
+    uint32_t peer = net_signal_client_peer(&client->signal);
+    if (peer != NET_NO_PEER)
+    {
+        client->peer = peer;
+        client->state = NetClientState::connecting;
+    }
+    return false;
 }
 
 // Across the internet: drives the beacon while meeting (and keeps punching
@@ -94,6 +150,11 @@ static bool beacon_step(NetClient* client, NetClientEvent* event)
     }
     if (client->beacon.state == NetBeaconMeetState::failed)
     {
+        if (start_signal(client))
+        {
+            net_beacon_client_stop(&client->beacon);   // UDP gave up: WebRTC now
+            return false;
+        }
         NetClientRefusal refusal = client->beacon.failure == NetBeaconFailure::host_offline
                                        ? NetClientRefusal::host_offline
                                        : NetClientRefusal::beacon_unreachable;
@@ -126,7 +187,9 @@ static void refuse(NetClient* client, NetClientRefusal refusal, bool we_close, N
     }
     forget_secrets(client);
     net_beacon_client_stop(&client->beacon);
+    net_signal_stop(&client->signal);
     client->via_beacon = false;
+    client->via_signal = false;
     client->state = NetClientState::idle;
     event->type = NetClientEventType::refused;
     event->refusal = refusal;
@@ -318,13 +381,19 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
 bool net_client_poll(NetClient* client, NetClientEvent* event)
 {
     *event = {};
-    if (beacon_step(client, event))
+    if (beacon_step(client, event) || signal_step(client, event))
     {
         return true;
     }
     NetSessionEvent session_event;
     while (net_session_poll(&client->session, &session_event))
     {
+        if (session_event.type == NetSessionEventType::signal)
+        {
+            // Our WebRTC blob (offer, candidates): to the host through the beacon.
+            net_signal_outgoing(&client->signal, session_event.peer, session_event.data, session_event.size);
+            continue;
+        }
         if (session_event.type == NetSessionEventType::beacon)
         {
             if (client->via_beacon)
@@ -347,7 +416,7 @@ bool net_client_poll(NetClient* client, NetClientEvent* event)
         case NetSessionEventType::none:
         case NetSessionEventType::discovered:
         case NetSessionEventType::beacon:
-        case NetSessionEventType::signal:   // WebRTC signaling: carried by the beacon (next step)
+        case NetSessionEventType::signal:
             break;
         case NetSessionEventType::secured:
             std::memcpy(client->host_key, session_event.remote_key, NET_KEY_SIZE);
@@ -374,9 +443,21 @@ bool net_client_poll(NetClient* client, NetClientEvent* event)
         {
             NetClientState state = client->state;
             bool via_beacon = client->via_beacon;
+            // UDP punched but ENet never connected: WebRTC through the
+            // signaling before giving up (the same flow, another transport).
+            if (via_beacon && !client->via_signal && state == NetClientState::connecting)
+            {
+                net_beacon_client_stop(&client->beacon);
+                if (start_signal(client))
+                {
+                    break;
+                }
+            }
             forget_secrets(client);
             net_beacon_client_stop(&client->beacon);
+            net_signal_stop(&client->signal);
             client->via_beacon = false;
+            client->via_signal = false;
             client->state = NetClientState::idle;
             if (state == NetClientState::ready)
             {
@@ -395,6 +476,10 @@ bool net_client_poll(NetClient* client, NetClientEvent* event)
         }
         if (event->type != NetClientEventType::none)
         {
+            if (event->type == NetClientEventType::ready && client->via_signal)
+            {
+                net_signal_stop(&client->signal);   // connected: the beacon's socket isn't needed any more
+            }
             return true;
         }
     }
@@ -419,6 +504,8 @@ void net_client_close(NetClient* client)
     if (client->state == NetClientState::meeting)
     {
         net_beacon_client_stop(&client->beacon);
+        net_signal_stop(&client->signal);
+        client->via_signal = false;
         client->via_beacon = false;
         client->state = NetClientState::idle;
         return;
