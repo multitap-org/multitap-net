@@ -57,6 +57,9 @@ constexpr uint32_t NET_BEACON_MAX_PUNCHES = 8;        // places punched at once 
 // The id both sides of a pairing compute. False if the shared secret is all
 // zeros (a key that can't be used: then the beacon isn't used either).
 bool net_beacon_meeting_id(const NetKeypair* own, const uint8_t* other_public_key, BeaconId* id);
+// The key that seals signaling blobs between the same two devices (32 bytes:
+// BLAKE2b("multitap signal v1" || X25519(own, other)); net_signal.h).
+bool net_beacon_signal_key(const NetKeypair* own, const uint8_t* other_public_key, uint8_t* key);
 
 // One server address (a family) as we talk to it.
 struct NetBeaconServer

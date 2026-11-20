@@ -98,7 +98,7 @@ static bool open_beacon(World* world)
     for (uint16_t attempt = 0; attempt < 20; attempt++)
     {
         uint16_t port = static_cast<uint16_t>(41000 + (beacon_now_ms() % 9000) + attempt * 2);
-        if (beacon_net_open(&world->net, "::", port, port + 1))
+        if (beacon_net_open(&world->net, "::", port, port + 1, -1))
         {
             return net_address_from_text("127.0.0.1", port, &world->beacon_address);
         }

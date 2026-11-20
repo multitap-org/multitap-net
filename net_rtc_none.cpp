@@ -80,3 +80,30 @@ size_t net_rtc_buffered(const NetRtc* rtc, uint32_t index, NetChannel channel)
     (void)channel;
     return 0;
 }
+
+NetRtcSocket* net_rtc_socket_open(const char* url)
+{
+    (void)url;
+    return nullptr;
+}
+
+void net_rtc_socket_close(NetRtcSocket* socket)
+{
+    (void)socket;
+}
+
+NetRtcSocketEvent net_rtc_socket_poll(NetRtcSocket* socket, const uint8_t** data, size_t* size)
+{
+    (void)socket;
+    *data = nullptr;
+    *size = 0;
+    return NetRtcSocketEvent::none;
+}
+
+bool net_rtc_socket_send(NetRtcSocket* socket, const uint8_t* data, size_t size)
+{
+    (void)socket;
+    (void)data;
+    (void)size;
+    return false;
+}

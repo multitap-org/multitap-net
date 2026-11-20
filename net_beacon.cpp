@@ -8,8 +8,12 @@
 #include "net_random.h"
 
 static const char MEETING_ID_PREFIX[] = "multitap beacon v1";
+static const char SIGNAL_KEY_PREFIX[] = "multitap signal v1";
 
-bool net_beacon_meeting_id(const NetKeypair* own, const uint8_t* other_public_key, BeaconId* id)
+// BLAKE2b(prefix || X25519(own, other)), `size` bytes. False for a shared
+// secret of all zeros (a key that can't be used).
+static bool derive(const NetKeypair* own, const uint8_t* other_public_key, const char* prefix, size_t prefix_size,
+                   uint8_t* out, size_t size)
 {
     uint8_t shared[NET_KEY_SIZE];
     crypto_x25519(shared, own->secret, other_public_key);
@@ -23,12 +27,22 @@ bool net_beacon_meeting_id(const NetKeypair* own, const uint8_t* other_public_ke
         return false;
     }
     crypto_blake2b_ctx context;
-    crypto_blake2b_init(&context, BEACON_ID_SIZE);
-    crypto_blake2b_update(&context, reinterpret_cast<const uint8_t*>(MEETING_ID_PREFIX), sizeof(MEETING_ID_PREFIX) - 1);
+    crypto_blake2b_init(&context, size);
+    crypto_blake2b_update(&context, reinterpret_cast<const uint8_t*>(prefix), prefix_size);
     crypto_blake2b_update(&context, shared, sizeof(shared));
-    crypto_blake2b_final(&context, id->bytes);
+    crypto_blake2b_final(&context, out);
     crypto_wipe(shared, sizeof(shared));
     return true;
+}
+
+bool net_beacon_meeting_id(const NetKeypair* own, const uint8_t* other_public_key, BeaconId* id)
+{
+    return derive(own, other_public_key, MEETING_ID_PREFIX, sizeof(MEETING_ID_PREFIX) - 1, id->bytes, BEACON_ID_SIZE);
+}
+
+bool net_beacon_signal_key(const NetKeypair* own, const uint8_t* other_public_key, uint8_t* key)
+{
+    return derive(own, other_public_key, SIGNAL_KEY_PREFIX, sizeof(SIGNAL_KEY_PREFIX) - 1, key, 32);
 }
 
 const char* net_beacon_status_name(NetBeaconStatus status)

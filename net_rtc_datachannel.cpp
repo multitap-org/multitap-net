@@ -21,6 +21,7 @@
 
 #include <rtc/rtc.h>
 
+#include "beacon_wire.h"
 #include "host_log.h"
 
 constexpr uint32_t QUEUE_SIZE = 64;
@@ -499,4 +500,123 @@ size_t net_rtc_buffered(const NetRtc* rtc, uint32_t index, NetChannel channel)
     int dc = rtc->peers[index].dc[static_cast<uint32_t>(channel)];
     int amount = dc >= 0 ? rtcGetBufferedAmount(dc) : 0;
     return amount > 0 ? static_cast<size_t>(amount) : 0;
+}
+
+// --- The signaling WebSocket ----------------------------------------------
+// The same split as the peers: open / closed come through callbacks (two
+// flags under a mutex), messages are read with rtcReceiveMessage.
+
+struct NetRtcSocket
+{
+    int        ws = -1;
+    std::mutex lock;
+    bool       opened = false;          // set by the callback
+    bool       closed = false;          // set by the callback
+    bool       open_reported = false;
+    bool       closed_reported = false;
+    std::vector<uint8_t> receive;
+};
+
+static void RTC_API on_socket_open(int ws, void* user)
+{
+    (void)ws;
+    NetRtcSocket* socket = static_cast<NetRtcSocket*>(user);
+    socket->lock.lock();
+    socket->opened = true;
+    socket->lock.unlock();
+}
+
+static void RTC_API on_socket_closed(int ws, void* user)
+{
+    (void)ws;
+    NetRtcSocket* socket = static_cast<NetRtcSocket*>(user);
+    socket->lock.lock();
+    socket->closed = true;
+    socket->lock.unlock();
+}
+
+static void RTC_API on_socket_error(int ws, const char* error, void* user)
+{
+    (void)ws;
+    host_log(LogLevel::warning, "Network: signaling socket: %s", error);
+    on_socket_closed(ws, user);
+}
+
+NetRtcSocket* net_rtc_socket_open(const char* url)
+{
+    NetRtcSocket* socket = new NetRtcSocket();
+    socket->receive.resize(BEACON_SIGNALING_MAX_SIZE);
+    rtcWsConfiguration config = {};
+    const char* protocols[1] = {"multitap-beacon.1"};
+    config.protocols = protocols;
+    config.protocolsCount = 1;
+    config.connectionTimeoutMs = 8000;
+    config.maxMessageSize = static_cast<int>(BEACON_SIGNALING_MAX_SIZE);
+    socket->ws = rtcCreateWebSocketEx(url, &config);
+    if (socket->ws < 0)
+    {
+        host_log(LogLevel::warning, "Network: can't open the signaling socket to %s", url);
+        delete socket;
+        return nullptr;
+    }
+    rtcSetUserPointer(socket->ws, socket);
+    rtcSetOpenCallback(socket->ws, on_socket_open);
+    rtcSetClosedCallback(socket->ws, on_socket_closed);
+    rtcSetErrorCallback(socket->ws, on_socket_error);
+    return socket;
+}
+
+void net_rtc_socket_close(NetRtcSocket* socket)
+{
+    if (socket == nullptr)
+    {
+        return;
+    }
+    if (socket->ws >= 0)
+    {
+        rtcDeleteWebSocket(socket->ws);   // no callbacks after it returns
+    }
+    delete socket;
+}
+
+NetRtcSocketEvent net_rtc_socket_poll(NetRtcSocket* socket, const uint8_t** data, size_t* size)
+{
+    *data = nullptr;
+    *size = 0;
+    socket->lock.lock();
+    bool opened = socket->opened;
+    bool closed = socket->closed;
+    socket->lock.unlock();
+    if (opened && !socket->open_reported)
+    {
+        socket->open_reported = true;
+        return NetRtcSocketEvent::open;
+    }
+    if (socket->open_reported && !socket->closed_reported)
+    {
+        int length = static_cast<int>(socket->receive.size());
+        while (rtcReceiveMessage(socket->ws, reinterpret_cast<char*>(socket->receive.data()), &length) ==
+               RTC_ERR_SUCCESS)
+        {
+            if (length > 0)
+            {
+                *data = socket->receive.data();
+                *size = static_cast<size_t>(length);
+                return NetRtcSocketEvent::message;
+            }
+            length = static_cast<int>(socket->receive.size());   // a text message: never ours, skipped
+        }
+    }
+    if (closed && !socket->closed_reported)
+    {
+        socket->closed_reported = true;
+        return NetRtcSocketEvent::closed;
+    }
+    return NetRtcSocketEvent::none;
+}
+
+bool net_rtc_socket_send(NetRtcSocket* socket, const uint8_t* data, size_t size)
+{
+    return socket->open_reported && !socket->closed_reported &&
+           rtcSendMessage(socket->ws, reinterpret_cast<const char*>(data), static_cast<int>(size)) >= 0;
 }

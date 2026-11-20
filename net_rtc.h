@@ -73,3 +73,22 @@ bool net_rtc_connected(const NetRtc* rtc, uint32_t index);
 void net_rtc_close(NetRtc* rtc, uint32_t index);
 // Bytes still queued to send on that channel (pacing; 0 if unknown).
 size_t net_rtc_buffered(const NetRtc* rtc, uint32_t index, NetChannel channel);
+
+// --- The beacon's signaling socket (a WebSocket; net_signal.h) -------------
+// "wss://beacon.example.org/signal" (or ws:// for tests), subprotocol
+// multitap-beacon.1, binary messages only. Polled like the rest.
+
+struct NetRtcSocket;
+
+enum class NetRtcSocketEvent
+{
+    none,
+    open,      // connected: messages can go
+    message,   // `data`/`size`: one binary message (valid until the next poll)
+    closed,    // closed or failed (net_rtc_socket_close it; open a new one to retry)
+};
+
+NetRtcSocket* net_rtc_socket_open(const char* url);
+void net_rtc_socket_close(NetRtcSocket* socket);
+NetRtcSocketEvent net_rtc_socket_poll(NetRtcSocket* socket, const uint8_t** data, size_t* size);
+bool net_rtc_socket_send(NetRtcSocket* socket, const uint8_t* data, size_t size);
