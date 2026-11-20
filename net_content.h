@@ -1,7 +1,7 @@
 #pragma once
 
 // Games from a client (netcode milestone 5): a paired device with FULL access
-// (net_pairing.h: message types 128 and up) browses the host's game folders
+// (net_pairing.h: message types 128..191) browses the host's game folders
 // and asks it to start a game with one of its cores.
 //
 // Paths the client sees are virtual, never the host's own: the first part
@@ -99,6 +99,22 @@ struct NetContentCore
     std::string version;
     std::string extensions;   // "smc|sfc|swc|fig", as the core says
 };
+
+// --- virtual paths ----------------------------------------------------------
+// Shared with net_share_folders.h: the same rules for every path a device sends.
+
+// One part of a virtual path, before it goes near the disk: not "", "." or
+// "..", no '\\', ':' or control characters.
+bool net_content_part_is_safe(const std::string* part);
+
+// "ROMS/snes/x.sfc" -> {"ROMS", "snes", "x.sfc"} ("" -> {""}; "a//b" keeps the
+// empty part, which net_content_part_is_safe refuses).
+void net_content_split_path(const char* path, std::vector<std::string>* parts);
+
+// A shared folder's own name, what a device sees: "/home/ana/roms/" ->
+// "roms"; a root ("/", "C:/") has none, so it's shown whole with '_' for
+// '/' and ':'.
+std::string net_content_folder_name(const std::string* path);
 
 // --- messages ---------------------------------------------------------------
 // Writers return the size, 0 if `capacity` is too small. Readers are false

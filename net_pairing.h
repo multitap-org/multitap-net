@@ -8,7 +8,7 @@
 // Every control message starts with a type byte. Types below
 // NET_MESSAGE_FIRST_APP belong to this layer; the rest are the application's,
 // and the type says the access level it needs (net_message_required_access):
-//   16..63 gamepad, 64..127 stream, 128..255 full.
+//   16..63 gamepad, 64..127 stream, 128..191 full, 192..255 owner.
 // The host drops what a device's level doesn't cover; the client is told its
 // level (welcome) only to show what it can use.
 //
@@ -58,6 +58,7 @@ enum class NetMessage : uint8_t
 constexpr uint8_t NET_MESSAGE_FIRST_APP = 16;
 constexpr uint8_t NET_MESSAGE_FIRST_STREAM = 64;
 constexpr uint8_t NET_MESSAGE_FIRST_FULL = 128;
+constexpr uint8_t NET_MESSAGE_FIRST_OWNER = 192;   // files (net_share)
 
 // The level an application message type needs.
 NetAccessLevel net_message_required_access(uint8_t type);

@@ -37,6 +37,41 @@ static void check(bool condition, const char* what)
     }
 }
 
+// The levels, the message ranges and the names in the device list.
+static void test_access_levels()
+{
+    check(net_message_required_access(16) == NetAccessLevel::gamepad &&
+              net_message_required_access(63) == NetAccessLevel::gamepad,
+          "16..63 need gamepad");
+    check(net_message_required_access(64) == NetAccessLevel::stream &&
+              net_message_required_access(127) == NetAccessLevel::stream,
+          "64..127 need stream");
+    check(net_message_required_access(128) == NetAccessLevel::full &&
+              net_message_required_access(191) == NetAccessLevel::full,
+          "128..191 need full");
+    check(net_message_required_access(NET_MESSAGE_FIRST_OWNER) == NetAccessLevel::owner &&
+              net_message_required_access(255) == NetAccessLevel::owner,
+          "192..255 need owner");
+    check(!net_access_allows(NetAccessLevel::full, NetAccessLevel::owner), "full doesn't reach owner messages");
+    check(net_access_allows(NetAccessLevel::owner, NetAccessLevel::full) &&
+              net_access_allows(NetAccessLevel::owner, NetAccessLevel::gamepad),
+          "owner includes every level below");
+    NetAccessLevel parsed = NetAccessLevel::gamepad;
+    check(net_access_level_parse("owner", &parsed) && parsed == NetAccessLevel::owner &&
+              std::strcmp(net_access_level_name(NetAccessLevel::owner), "owner") == 0,
+          "owner by name");
+    check(!net_access_level_parse("boss", &parsed) && parsed == NetAccessLevel::owner, "unknown names refused");
+
+    uint8_t welcome[64] = {};
+    size_t size = net_message_write_welcome(welcome, sizeof(welcome), NetAccessLevel::owner, "HOST");
+    NetAccessLevel told = NetAccessLevel::gamepad;
+    char host_name[64] = {};
+    check(size > 0 && net_message_read_welcome(welcome, size, &told, host_name) && told == NetAccessLevel::owner,
+          "welcome carries owner");
+    welcome[1] = NET_ACCESS_LEVEL_COUNT;
+    check(!net_message_read_welcome(welcome, size, &told, host_name), "welcome with a level past owner refused");
+}
+
 static void test_discovery_packets()
 {
     uint8_t packet[NET_DISCOVERY_MAX_PACKET];
@@ -709,6 +744,11 @@ static void test_pairing(const char* folder)
     check(loop->host_got_stream_message, "full level: stream message delivered");
     net_trust_load(&saved, host_trust.c_str());
     check(saved.devices.size() == 1 && saved.devices[0].access == NetAccessLevel::full, "access level saved");
+    net_access_set_level(&loop->host, 0, NetAccessLevel::owner);
+    net_trust_load(&saved, host_trust.c_str());
+    check(saved.devices.size() == 1 && saved.devices[0].access == NetAccessLevel::owner, "owner saved");
+    net_access_set_level(&loop->host, 0, NetAccessLevel::full);
+    pump_for(loop, 100);
 
     // A list from before access: own = true reads as full, nothing as gamepad.
     std::string old_list = std::string(folder) + "/old_devices.cfg";
@@ -796,6 +836,7 @@ static void test_pairing(const char* folder)
 
 int main(int argc, char** argv)
 {
+    test_access_levels();
     test_discovery_packets();
     if (!net_init())
     {

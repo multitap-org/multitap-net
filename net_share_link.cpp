@@ -1,0 +1,318 @@
+#include "net_share_link.h"
+
+#include <chrono>
+#include <cstring>
+
+#include "host_log.h"
+#include "net_link.h"
+#include "net_share_host.h"
+
+static double seconds_now()
+{
+    std::chrono::steady_clock::duration since = std::chrono::steady_clock::now().time_since_epoch();
+    return std::chrono::duration<double>(since).count();
+}
+
+static bool same_address(const NetAddress* a, const NetAddress* b)
+{
+    return a->port == b->port && std::memcmp(a->ip, b->ip, sizeof(a->ip)) == 0;
+}
+
+// With the lock held: a discovery reply, kept (or refreshed) in `found`.
+static void on_discovered(NetShareLink* link, const NetEvent* event, double now)
+{
+    NetAddress address = event->address;
+    address.port = event->discovered.port;
+    NetShareLinkFound* slot = nullptr;
+    for (uint32_t i = 0; i < link->found_count && slot == nullptr; i++)
+    {
+        if (same_address(&link->found[i].address, &address))
+        {
+            slot = &link->found[i];
+        }
+    }
+    if (slot == nullptr)
+    {
+        if (link->found_count == NET_SHARE_LINK_FOUND_MAX)
+        {
+            return;
+        }
+        slot = &link->found[link->found_count];
+        link->found_count++;
+        slot->address = address;
+    }
+    slot->name = event->discovered.name;
+    slot->seen_at = now;
+}
+
+// With the lock held: asks the LAN now and then, keeps who answers.
+static void discover(NetShareLink* link, double now)
+{
+    if (!link->discovery_ready)
+    {
+        return;
+    }
+    if (now >= link->next_discovery)
+    {
+        link->next_discovery = now + NET_SHARE_LINK_DISCOVERY_SECONDS;
+        net_host_discover(&link->discovery, NET_DEFAULT_PORT);
+    }
+    NetEvent event;
+    while (net_host_poll(&link->discovery, &event))
+    {
+        if (event.type == NetEventType::discovered)
+        {
+            on_discovered(link, &event, now);
+        }
+    }
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < link->found_count; i++)
+    {
+        if (now - link->found[i].seen_at <= NET_SHARE_LINK_FOUND_SECONDS)
+        {
+            if (kept != i)
+            {
+                link->found[kept] = link->found[i];
+            }
+            kept++;
+        }
+    }
+    link->found_count = kept;
+}
+
+// With the lock held: the connection's events, then what the copies send.
+static void poll_client(NetShareLink* link)
+{
+    NetClientEvent event;
+    while (net_client_poll(&link->client, &event))
+    {
+        switch (event.type)
+        {
+        case NetClientEventType::ready:
+            link->state = NetShareLinkState::ready;
+            link->refusal = NetClientRefusal::none;
+            host_log(LogLevel::info, "Network: share: connected to %s", link->client.host_name);
+            break;
+        case NetClientEventType::refused:
+        case NetClientEventType::closed:
+            net_share_client_disconnected(&link->share);
+            link->state = NetShareLinkState::idle;
+            if (link->closing)
+            {
+                link->closing = false;   // ours: not a failure
+                link->refusal = NetClientRefusal::none;
+            }
+            else
+            {
+                link->refusal = event.type == NetClientEventType::refused ? event.refusal : NetClientRefusal::connection;
+            }
+            break;
+        case NetClientEventType::message:
+            net_share_client_handle(&link->share, event.data, event.size);
+            break;
+        default:
+            break;
+        }
+    }
+    if (link->connect_pending && link->client.state == NetClientState::idle)
+    {
+        link->connect_pending = false;
+        link->closing = false;
+        bool started = net_client_connect(&link->client, link->connect_address,
+                                          link->connect_code.empty() ? nullptr : link->connect_code.c_str());
+        link->state = started ? NetShareLinkState::connecting : NetShareLinkState::idle;
+        link->refusal = started ? NetClientRefusal::none : NetClientRefusal::connection;
+    }
+    if (link->state != NetShareLinkState::ready)
+    {
+        return;
+    }
+    for (;;)
+    {
+        bool may_send = net_client_pending(&link->client) < NET_SHARE_HOST_PENDING;
+        NetChannel channel = NetChannel::control;
+        size_t size = net_share_client_take(&link->share, may_send, link->out.data(), link->out.size(), &channel);
+        if (size == 0)
+        {
+            break;
+        }
+        if (!net_client_send(&link->client, channel, link->out.data(), size))
+        {
+            net_share_client_cancel(&link->share);   // the host can't take files (an older build)
+            break;
+        }
+    }
+}
+
+static void run(NetShareLink* link)
+{
+    for (;;)
+    {
+        link->lock.lock();
+        if (!link->running)
+        {
+            link->lock.unlock();
+            return;
+        }
+        poll_client(link);
+        discover(link, seconds_now());
+        link->lock.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+bool net_share_link_start(NetShareLink* link, const NetKeypair* identity, const char* name, const char* hosts_path)
+{
+    if (link->running)
+    {
+        return true;
+    }
+    if (!net_client_create(&link->client, identity, name, hosts_path))
+    {
+        net_client_destroy(&link->client);
+        return false;
+    }
+    link->discovery_ready = net_host_create_client(&link->discovery);
+    link->out.assign(NET_LINK_MAX_PAYLOAD, 0);
+    net_share_client_start(&link->share, &link->folders);
+    link->state = NetShareLinkState::idle;
+    link->refusal = NetClientRefusal::none;
+    link->found_count = 0;
+    link->next_discovery = 0.0;
+    link->running = true;
+    link->thread = std::thread(run, link);
+    return true;
+}
+
+void net_share_link_stop(NetShareLink* link)
+{
+    if (!link->thread.joinable())
+    {
+        return;
+    }
+    link->lock.lock();
+    link->running = false;
+    link->lock.unlock();
+    link->thread.join();
+    net_share_client_disconnected(&link->share);
+    net_share_client_stop(&link->share);
+    net_client_close(&link->client);
+    net_client_destroy(&link->client);
+    if (link->discovery_ready)
+    {
+        net_host_destroy(&link->discovery);
+        link->discovery_ready = false;
+    }
+    link->state = NetShareLinkState::off;
+}
+
+bool net_share_link_started(const NetShareLink* link)
+{
+    return link->thread.joinable();
+}
+
+void net_share_link_set_folders(NetShareLink* link, const std::vector<std::string>* game_paths,
+                                const char* saves_path, const char* states_path)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    net_share_set_folders(&link->folders, game_paths, saves_path, states_path);
+}
+
+bool net_share_link_connect(NetShareLink* link, NetAddress address, const char* code)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    if (!link->running)
+    {
+        return false;
+    }
+    if (link->client.state != NetClientState::idle)
+    {
+        if (!link->closing)
+        {
+            net_client_close(&link->client);
+            link->closing = true;
+        }
+        net_share_client_disconnected(&link->share);
+    }
+    // Started by the thread once the client is idle (at its next poll, or
+    // once the old connection is gone).
+    link->connect_pending = true;
+    link->connect_address = address;
+    link->connect_code = code;
+    link->state = NetShareLinkState::connecting;
+    link->refusal = NetClientRefusal::none;
+    return true;
+}
+
+void net_share_link_disconnect(NetShareLink* link)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    link->connect_pending = false;
+    if (link->running && link->client.state != NetClientState::idle && !link->closing)
+    {
+        net_client_close(&link->client);
+        link->closing = true;
+    }
+    net_share_client_disconnected(&link->share);
+    link->state = link->running ? NetShareLinkState::idle : NetShareLinkState::off;
+    link->refusal = NetClientRefusal::none;
+}
+
+void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    status->state = link->state;
+    status->refusal = link->refusal;
+    status->access = link->client.access;
+    status->host_name = link->state == NetShareLinkState::ready ? link->client.host_name : "";
+    status->found.clear();
+    for (uint32_t i = 0; i < link->found_count; i++)
+    {
+        status->found.push_back(link->found[i]);
+    }
+}
+
+void net_share_link_list(NetShareLink* link, const char* path)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    net_share_client_list(&link->share, path);
+}
+
+bool net_share_link_listing(NetShareLink* link, std::string* path, NetShareStatus* status,
+                            std::vector<NetShareEntry>* entries)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    if (!net_share_client_listing(&link->share, path, status, entries))
+    {
+        return false;
+    }
+    link->share.list_done = false;   // handed over once
+    return true;
+}
+
+uint32_t net_share_link_copy(NetShareLink* link, bool to_remote, const char* local, const char* remote, uint64_t size,
+                             uint8_t flags)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    return net_share_client_copy(&link->share, to_remote, local, remote, size, flags);
+}
+
+void net_share_link_cancel(NetShareLink* link)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    net_share_client_cancel(&link->share);
+}
+
+void net_share_link_progress(NetShareLink* link, NetShareProgress* progress, NetShareClientCopy* copy,
+                             uint32_t* queued)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    net_share_client_progress(&link->share, progress, copy, queued);
+}
+
+void net_share_link_take_done(NetShareLink* link, std::vector<NetShareClientDone>* done)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    done->clear();
+    done->swap(link->share.done);
+}
