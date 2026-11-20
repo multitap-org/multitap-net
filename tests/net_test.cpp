@@ -319,6 +319,7 @@ struct SessionLoop
     uint8_t client_hash[NET_HASH_SIZE] = {};
     bool listener_got_control = false;
     bool listener_got_input = false;
+    uint32_t listener_files_bytes = 0;   // file chunks received (all 0xF1)
     bool client_got_control = false;
     bool client_closed = false;
     bool listener_closed_unsecured = false;
@@ -347,6 +348,10 @@ static void session_pump(SessionLoop* loop)
             else if (event.channel == NetChannel::input && event.size == 2 && event.data[0] == 7)
             {
                 loop->listener_got_input = true;
+            }
+            else if (event.channel == NetChannel::files && event.size > 0 && event.data[0] == 0xF1)
+            {
+                loop->listener_files_bytes += static_cast<uint32_t>(event.size);
             }
         }
         else if (event.type == NetSessionEventType::closed && !event.was_secured)
@@ -412,6 +417,28 @@ static void test_session()
     check(session_pump_until(loop, &loop->listener_got_control), "ping arrived (decrypted)");
     check(session_pump_until(loop, &loop->listener_got_input), "input arrived (decrypted)");
     check(session_pump_until(loop, &loop->client_got_control), "pong came back");
+
+    // The files channel: reliable, its own nonces. 8 chunks of 16 KiB: what
+    // ENet still has for that peer shows in net_host_peer_pending, and goes
+    // back to 0 once everything is acknowledged.
+    static uint8_t chunk[16 * 1024];
+    std::memset(chunk, 0xF1, sizeof(chunk));
+    bool files_sent = true;
+    for (int i = 0; i < 8; i++)
+    {
+        files_sent = files_sent && net_session_send(&loop->client, peer, NetChannel::files, chunk, sizeof(chunk));
+    }
+    check(files_sent, "chunks sent on files");
+    check(net_host_peer_pending(&loop->client.host, peer) >= 8 * sizeof(chunk), "pending counts what's queued");
+    bool files_done = false;
+    for (int i = 0; i < 400 && !files_done; i++)
+    {
+        session_pump(loop);
+        files_done = loop->listener_files_bytes == 8 * sizeof(chunk) && net_host_peer_pending(&loop->client.host, peer) == 0;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    check(loop->listener_files_bytes == 8 * sizeof(chunk), "every chunk arrived (decrypted, in order)");
+    check(net_host_peer_pending(&loop->client.host, peer) == 0, "pending back to 0 once acknowledged");
 
     // The frame loop must not allocate: like a game sending input every frame,
     // both ways. Warmed up, a round of 1000 packets each way takes nothing from

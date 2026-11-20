@@ -97,7 +97,7 @@ static bool on_received(NetSession* session, const NetEvent* net, NetSessionEven
         return false;
     }
     size_t payload_size = 0;
-    if (net->channel == NetChannel::input || net->channel == NetChannel::stream)
+    if (net->channel == NetChannel::input || net->channel == NetChannel::stream || net->channel == NetChannel::files)
     {
         if (!net_link_open_unreliable(&peer->link, net->channel, net->data, net->size, session->payload.data(),
                                       session->payload.size(), &payload_size))
