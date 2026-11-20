@@ -110,16 +110,26 @@ NetLinkReceive net_link_receive_control(NetLink* link, const uint8_t* data, size
 bool net_link_open_input(NetLink* link, const uint8_t* data, size_t size, uint8_t* payload, size_t capacity,
                          size_t* payload_size)
 {
+    return net_link_open_unreliable(link, NetChannel::input, data, size, payload, capacity, payload_size);
+}
+
+bool net_link_open_unreliable(NetLink* link, NetChannel channel, const uint8_t* data, size_t size, uint8_t* payload,
+                              size_t capacity, size_t* payload_size)
+{
     *payload_size = 0;
-    if (link->state != NetLinkState::ready || size < NET_LINK_OVERHEAD ||
+    if (link->state != NetLinkState::ready || channel == NetChannel::control || size < NET_LINK_OVERHEAD ||
         size - NET_LINK_OVERHEAD > capacity)
     {
         link->input_dropped++;
         return false;
     }
+    bool stream = channel == NetChannel::stream;
     uint64_t nonce = read_u64(data);
-    // Must be an input nonce, and newer than the last one we accepted.
-    if ((nonce & NET_LINK_INPUT_NONCE_BIT) == 0 || nonce <= link->input_last)
+    uint64_t* last = stream ? &link->stream_last : &link->input_last;
+    // A nonce of this channel's space, newer than the last one accepted.
+    bool input_space = (nonce & NET_LINK_INPUT_NONCE_BIT) != 0;
+    bool stream_space = (nonce & NET_LINK_STREAM_NONCE_BIT) != 0;
+    if (!input_space || stream_space != stream || nonce <= *last)
     {
         link->input_dropped++;
         return false;
@@ -128,12 +138,12 @@ bool net_link_open_input(NetLink* link, const uint8_t* data, size_t size, uint8_
     if (!net_cipher_decrypt_at(&link->receive, nonce, nullptr, 0, data + NET_LINK_INPUT_HEADER_SIZE, cipher_size,
                                payload))
     {
-        // Unlike control, a bad input packet doesn't kill the link: anyone can
-        // send a datagram that looks like ENet's. It's just dropped.
+        // Unlike control, a bad unreliable packet doesn't kill the link:
+        // anyone can send a datagram that looks like ENet's. It's dropped.
         link->input_dropped++;
         return false;
     }
-    link->input_last = nonce;
+    *last = nonce;
     *payload_size = cipher_size - NET_MAC_SIZE;
     return true;
 }
@@ -152,8 +162,9 @@ bool net_link_seal(NetLink* link, NetChannel channel, const uint8_t* data, size_
         *out_size = size + NET_MAC_SIZE;
         return true;
     }
-    uint64_t nonce = link->input_next;
-    link->input_next++;
+    uint64_t* next = channel == NetChannel::stream ? &link->stream_next : &link->input_next;
+    uint64_t nonce = *next;
+    (*next)++;
     write_u64(out, nonce);
     net_cipher_encrypt_at(&link->send, nonce, nullptr, 0, data, size, out + NET_LINK_INPUT_HEADER_SIZE);
     *out_size = NET_LINK_INPUT_HEADER_SIZE + size + NET_MAC_SIZE;

@@ -97,17 +97,17 @@ static bool on_received(NetSession* session, const NetEvent* net, NetSessionEven
         return false;
     }
     size_t payload_size = 0;
-    if (net->channel == NetChannel::input)
+    if (net->channel == NetChannel::input || net->channel == NetChannel::stream)
     {
-        if (!net_link_open_input(&peer->link, net->data, net->size, session->payload.data(), session->payload.size(),
-                                 &payload_size))
+        if (!net_link_open_unreliable(&peer->link, net->channel, net->data, net->size, session->payload.data(),
+                                      session->payload.size(), &payload_size))
         {
             return false;   // dropped (counted in the link)
         }
         event->type = NetSessionEventType::message;
         event->peer = net->peer;
         event->address = net->address;
-        event->channel = NetChannel::input;
+        event->channel = net->channel;
         event->data = session->payload.data();
         event->size = payload_size;
         return true;

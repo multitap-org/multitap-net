@@ -276,12 +276,12 @@ bool net_client_poll(NetClient* client, NetClientEvent* event)
             client->state = NetClientState::waiting;
             break;
         case NetSessionEventType::message:
-            if (session_event.channel == NetChannel::input)
+            if (session_event.channel != NetChannel::control)
             {
                 if (client->state == NetClientState::ready)
                 {
                     event->type = NetClientEventType::message;
-                    event->channel = NetChannel::input;
+                    event->channel = session_event.channel;
                     event->data = session_event.data;
                     event->size = session_event.size;
                 }
