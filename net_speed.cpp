@@ -82,6 +82,38 @@ bool net_speed_read_report(const uint8_t* data, size_t size, NetSpeedReport* rep
     return true;
 }
 
+size_t net_speed_write_result(uint8_t* out, size_t capacity, const NetSpeedResult* result)
+{
+    NetWriter writer = {out, capacity, 0, true};
+    net_wire_put_u8(&writer, NET_SPEED_RESULT);
+    net_wire_put_u8(&writer, static_cast<uint8_t>(result->direction));
+    net_wire_put_u32(&writer, result->asked_kbps);
+    net_wire_put_u32(&writer, result->got_kbps);
+    net_wire_put_u16(&writer, result->loss_per_mille);
+    return writer.ok ? writer.size : 0;
+}
+
+bool net_speed_read_result(const uint8_t* data, size_t size, NetSpeedResult* result)
+{
+    NetReader reader;
+    reader.data = data;
+    reader.size = size;
+    if (net_wire_get_u8(&reader) != NET_SPEED_RESULT)
+    {
+        return false;
+    }
+    uint8_t which = net_wire_get_u8(&reader);
+    result->asked_kbps = net_wire_get_u32(&reader);
+    result->got_kbps = net_wire_get_u32(&reader);
+    result->loss_per_mille = net_wire_get_u16(&reader);
+    if (!net_wire_done(&reader) || which > 1 || result->loss_per_mille > 1000)
+    {
+        return false;
+    }
+    result->direction = static_cast<NetSpeedDirection>(which);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 
 void net_speed_sender_start(NetSpeedSender* sender, uint32_t id, uint32_t peer, uint32_t rate_kbps,

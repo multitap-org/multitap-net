@@ -125,6 +125,7 @@ struct NetLinkStats
 
 // False if `peer` isn't connected.
 bool net_host_peer_stats(const NetHost* host, uint32_t peer, NetLinkStats* stats);
+bool net_host_peer_address(const NetHost* host, uint32_t peer, NetAddress* address);
 
 // Polite: queued data is sent first, then `disconnected` follows.
 void net_host_disconnect(NetHost* host, uint32_t peer);

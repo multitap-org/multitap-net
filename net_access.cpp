@@ -523,3 +523,12 @@ bool net_access_peer_stats(const NetAccess* access, uint32_t peer, NetLinkStats*
     }
     return net_host_peer_stats(&access->session.host, peer, stats);
 }
+
+bool net_access_peer_address(const NetAccess* access, uint32_t peer, NetAddress* address)
+{
+    if (peer >= NET_MAX_PEERS || access->peers[peer].state != NetAccessPeerState::authorized)
+    {
+        return false;
+    }
+    return net_host_peer_address(&access->session.host, peer, address);
+}
