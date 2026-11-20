@@ -190,6 +190,27 @@ void net_share_link_stop(NetShareLink* link)
     {
         return;
     }
+    // Close politely first and let the thread see it through (briefly): the
+    // host frees our slot now instead of when its timeout notices.
+    link->lock.lock();
+    link->connect_pending = false;
+    if (link->client.state != NetClientState::idle && !link->closing)
+    {
+        net_client_close(&link->client);
+        link->closing = true;
+    }
+    link->lock.unlock();
+    for (int i = 0; i < 500; i++)
+    {
+        link->lock.lock();
+        bool idle = link->client.state == NetClientState::idle;
+        link->lock.unlock();
+        if (idle)
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     link->lock.lock();
     link->running = false;
     link->lock.unlock();
