@@ -1,7 +1,7 @@
 // WebRTC data channels (net_rtc_datachannel.cpp) under NetSession, in one
 // process: a host and a client hand each other their signal blobs directly
 // (the beacon's job in real use), the data channels open, the Noise handshake
-// runs on them as it does over ENet, and messages pass on all three channels.
+// runs on them as it does over ENet, and messages pass on all four channels.
 // Then the client closes and the host sees it. Host candidates only (no
 // STUN): loopback.
 
@@ -117,7 +117,7 @@ int main()
 
     const uint8_t abc[] = {'a', 'b', 'c'};
     // Unreliable channels may drop on a busy machine: a few tries each.
-    for (int attempt = 0; attempt < 20 && !(loop->got[0] && loop->got[1] && loop->got[2]); attempt++)
+    for (int attempt = 0; attempt < 20 && !(loop->got[0] && loop->got[1] && loop->got[2] && loop->got[3]); attempt++)
     {
         for (uint32_t c = 0; c < NET_CHANNEL_COUNT; c++)
         {
@@ -135,6 +135,7 @@ int main()
     check(loop->got[0], "control message arrived");
     check(loop->got[1], "input message arrived");
     check(loop->got[2], "stream message arrived");
+    check(loop->got[3], "files message arrived");
 
     net_session_close(&loop->client, loop->client_peer);
     check(pump_until(loop, &loop->host_closed, 10000), "host saw the client leave");

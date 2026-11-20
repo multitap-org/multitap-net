@@ -51,8 +51,12 @@ enum class NetChannel : uint8_t
     control = 0,
     input = 1,    // unreliable, sequenced: pads, test packets
     stream = 2,   // unreliable, sequenced: remote play's frames and audio (net_stream.h)
+    files = 3,    // reliable, in order: file transfers (piccolo-share), apart from control so a
+                  // lost chunk never holds control's sequence up
 };
-constexpr uint8_t NET_CHANNEL_COUNT = 3;
+// A peer built before `files` asks for 3 channels: ENet clamps both ways, so
+// it still connects; net_host_send refuses `files` to it.
+constexpr uint8_t NET_CHANNEL_COUNT = 4;
 
 // An address and port. IPv6, with IPv4 addresses kept IPv4-mapped
 // (::ffff:a.b.c.d), as the dual-stack socket sees them.
@@ -120,6 +124,7 @@ struct NetHost
     uint32_t    enet_slot[NET_MAX_PEERS];   // ENet peer -> slot (NET_NO_PEER)
     uint32_t    rtc_slot[NET_MAX_PEERS];    // WebRTC peer -> slot (NET_NO_PEER)
     NetRtc*     rtc = nullptr;              // WebRTC, once net_host_enable_rtc
+    bool        files_refused_logged = false;   // a peer without the `files` channel (logged once)
 };
 
 // ENet's global setup (WSAStartup on Windows). Counted: each successful
@@ -162,6 +167,13 @@ struct NetLinkStats
     uint32_t jitter_ms = 0;
     float    loss = 0.0f;   // 0..1
 };
+
+// Bytes of reliable data for this peer still on their way: sent and not yet
+// acknowledged, plus queued and not sent yet (control and files). What a
+// sender paces against (piccolo-share sends a chunk only below ~128 KiB):
+// ENet shares one window between a peer's reliable channels, so this is what
+// keeps control from waiting behind file data. 0 if `peer` isn't connected.
+size_t net_host_peer_pending(const NetHost* host, uint32_t peer);
 
 // False if `peer` isn't connected.
 bool net_host_peer_stats(const NetHost* host, uint32_t peer, NetLinkStats* stats);

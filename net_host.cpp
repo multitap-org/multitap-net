@@ -567,8 +567,19 @@ bool net_host_send(NetHost* host, uint32_t peer, NetChannel channel, const uint8
     {
         return false;
     }
-    // No flag = unreliable but sequenced, which is what `input` wants.
-    enet_uint32 flags = channel == NetChannel::control ? ENET_PACKET_FLAG_RELIABLE : 0;
+    if (static_cast<size_t>(channel) >= enet_peer->channelCount)
+    {
+        // A peer from before that channel (`files`: 3 channels).
+        if (!host->files_refused_logged)
+        {
+            host_log(LogLevel::warning, "Network: a peer without the files channel (older build)");
+            host->files_refused_logged = true;
+        }
+        return false;
+    }
+    // No flag = unreliable but sequenced, which is what `input` and `stream` want.
+    bool reliable = channel == NetChannel::control || channel == NetChannel::files;
+    enet_uint32 flags = reliable ? ENET_PACKET_FLAG_RELIABLE : 0;
     ENetPacket* packet = enet_packet_create(data, size, flags);
     if (packet == nullptr)
     {
@@ -580,6 +591,41 @@ bool net_host_send(NetHost* host, uint32_t peer, NetChannel channel, const uint8
         return false;
     }
     return true;
+}
+
+static size_t queued_bytes(const ENetList* list)
+{
+    size_t total = 0;
+    for (const ENetListNode* node = list->sentinel.next; node != &list->sentinel; node = node->next)
+    {
+        // The command node is the first member of ENetOutgoingCommand.
+        const ENetOutgoingCommand* command = reinterpret_cast<const ENetOutgoingCommand*>(node);
+        if ((command->command.header.command & ENET_PROTOCOL_COMMAND_FLAG_ACKNOWLEDGE) != 0)
+        {
+            total += command->fragmentLength;
+        }
+    }
+    return total;
+}
+
+size_t net_host_peer_pending(const NetHost* host, uint32_t peer)
+{
+    if (is_rtc(host, peer))
+    {
+        // What the data channels still hold to send (reliable ones).
+        uint32_t index = host->slots[peer].index;
+        return net_rtc_buffered(host->rtc, index, NetChannel::control) +
+               net_rtc_buffered(host->rtc, index, NetChannel::files);
+    }
+    const ENetPeer* enet_peer = enet_peer_of(host, peer);
+    if (enet_peer == nullptr || enet_peer->state != ENET_PEER_STATE_CONNECTED)
+    {
+        return 0;
+    }
+    // In flight, plus what waits for the window (a few hundred nodes at most
+    // while a sender paces against this).
+    return enet_peer->reliableDataInTransit + queued_bytes(&enet_peer->outgoingCommands) +
+           queued_bytes(&enet_peer->outgoingSendReliableCommands);
 }
 
 bool net_host_peer_stats(const NetHost* host, uint32_t peer, NetLinkStats* stats)

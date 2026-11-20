@@ -124,12 +124,15 @@ bool net_link_open_unreliable(NetLink* link, NetChannel channel, const uint8_t* 
         return false;
     }
     bool stream = channel == NetChannel::stream;
+    bool files = channel == NetChannel::files;
     uint64_t nonce = read_u64(data);
-    uint64_t* last = stream ? &link->stream_last : &link->input_last;
-    // A nonce of this channel's space, newer than the last one accepted.
+    uint64_t* last = stream ? &link->stream_last : (files ? &link->files_last : &link->input_last);
+    // A nonce of this channel's space, newer than the last one accepted
+    // (files: reliable and in order, so strictly increasing holds too).
     bool input_space = (nonce & NET_LINK_INPUT_NONCE_BIT) != 0;
     bool stream_space = (nonce & NET_LINK_STREAM_NONCE_BIT) != 0;
-    if (!input_space || stream_space != stream || nonce <= *last)
+    bool files_space = (nonce & NET_LINK_FILES_NONCE_BIT) != 0;
+    if (!input_space || stream_space != stream || files_space != files || nonce <= *last)
     {
         link->input_dropped++;
         return false;
@@ -162,7 +165,9 @@ bool net_link_seal(NetLink* link, NetChannel channel, const uint8_t* data, size_
         *out_size = size + NET_MAC_SIZE;
         return true;
     }
-    uint64_t* next = channel == NetChannel::stream ? &link->stream_next : &link->input_next;
+    uint64_t* next = channel == NetChannel::stream ? &link->stream_next
+                     : channel == NetChannel::files ? &link->files_next
+                                                    : &link->input_next;
     uint64_t nonce = *next;
     (*next)++;
     write_u64(out, nonce);

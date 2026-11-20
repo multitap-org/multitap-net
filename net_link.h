@@ -34,6 +34,8 @@
 constexpr const char* NET_LINK_PROLOGUE = "multitap-net 1";
 constexpr uint64_t NET_LINK_INPUT_NONCE_BIT = 1ull << 63;
 constexpr uint64_t NET_LINK_STREAM_NONCE_BIT = 1ull << 62;   // with the input bit
+constexpr uint64_t NET_LINK_FILES_NONCE_BIT = 1ull << 61;    // with the input bit (reliable, but its own
+                                                             // space: it arrives interleaved with control)
 constexpr size_t NET_LINK_INPUT_HEADER_SIZE = 8;
 // The most a sealed packet adds to its payload (input: nonce + MAC).
 constexpr size_t NET_LINK_OVERHEAD = NET_LINK_INPUT_HEADER_SIZE + NET_MAC_SIZE;
@@ -57,6 +59,8 @@ struct NetLink
     uint64_t  input_last = 0;                          // the last input nonce accepted (0 = none yet)
     uint64_t  stream_next = NET_LINK_INPUT_NONCE_BIT | NET_LINK_STREAM_NONCE_BIT;
     uint64_t  stream_last = 0;
+    uint64_t  files_next = NET_LINK_INPUT_NONCE_BIT | NET_LINK_FILES_NONCE_BIT;
+    uint64_t  files_last = 0;
     uint8_t   remote_key[NET_KEY_SIZE] = {};           // their static (device) key, once ready
     uint8_t   handshake_hash[NET_HASH_SIZE] = {};      // equal on both sides; binds pairing codes later
     uint32_t  input_dropped = 0;                       // bad or replayed input packets

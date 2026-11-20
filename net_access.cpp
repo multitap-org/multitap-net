@@ -582,3 +582,8 @@ NetBeaconStatus net_access_beacon_status(const NetAccess* access)
 {
     return net_beacon_host_status(&access->beacon, net_seconds());
 }
+
+size_t net_access_peer_pending(const NetAccess* access, uint32_t peer)
+{
+    return net_host_peer_pending(&access->session.host, peer);
+}

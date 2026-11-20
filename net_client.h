@@ -107,6 +107,8 @@ void net_client_close(NetClient* client);
 
 // How the connection to the host is doing (ping). False unless ready.
 bool net_client_stats(const NetClient* client, NetLinkStats* stats);
+// Reliable bytes still on their way to the host (net_host_peer_pending); 0 unless ready.
+size_t net_client_pending(const NetClient* client);
 
 // Unpairs from the host at `device` in our list (saved at once). If we're
 // connected to it now it's told (it forgets us too) and the connection

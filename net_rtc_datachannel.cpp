@@ -52,7 +52,7 @@ struct NetRtcPeer
     uint32_t channels_open = 0;
     double   started = -1.0;          // net_rtc_poll's clock, set at its first look
     int      pc = -1;
-    int      dc[NET_CHANNEL_COUNT] = {-1, -1, -1};
+    int      dc[NET_CHANNEL_COUNT] = {};   // -1 = none (set by open_peer / teardown)
 };
 
 struct NetRtc
@@ -173,6 +173,10 @@ NetRtc* net_rtc_create(const char* stun)
     {
         rtc->peers[i].owner = rtc;
         rtc->peers[i].index = i;
+        for (uint32_t c = 0; c < NET_CHANNEL_COUNT; c++)
+        {
+            rtc->peers[i].dc[c] = -1;
+        }
     }
     return rtc;
 }
@@ -261,13 +265,17 @@ static bool open_peer(NetRtc* rtc, bool answering, uint32_t* index)
     rtcSetLocalDescriptionCallback(peer->pc, on_description);
     rtcSetLocalCandidateCallback(peer->pc, on_candidate);
     rtcSetStateChangeCallback(peer->pc, on_state);
-    static const char* LABELS[NET_CHANNEL_COUNT] = {"control", "input", "stream"};
+    static const char* LABELS[NET_CHANNEL_COUNT] = {"control", "input", "stream", "files"};
+    for (uint32_t c = 0; c < NET_CHANNEL_COUNT; c++)
+    {
+        peer->dc[c] = -1;
+    }
     for (uint32_t c = 0; c < NET_CHANNEL_COUNT; c++)
     {
         rtcDataChannelInit init = {};
-        // control: reliable, ordered. input, stream: unordered, never sent
-        // again (net_link drops anything older than what it already took).
-        bool reliable = c == static_cast<uint32_t>(NetChannel::control);
+        // control, files: reliable, ordered. input, stream: unordered, never
+        // sent again (net_link drops anything older than what it already took).
+        bool reliable = c == static_cast<uint32_t>(NetChannel::control) || c == static_cast<uint32_t>(NetChannel::files);
         init.reliability.unordered = !reliable;
         init.reliability.unreliable = !reliable;
         init.reliability.maxRetransmits = 0;
