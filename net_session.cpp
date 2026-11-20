@@ -97,7 +97,7 @@ static bool on_received(NetSession* session, const NetEvent* net, NetSessionEven
         return false;
     }
     size_t payload_size = 0;
-    if (net->channel == NetChannel::input || net->channel == NetChannel::stream)
+    if (net->channel == NetChannel::input || net->channel == NetChannel::stream || net->channel == NetChannel::files)
     {
         if (!net_link_open_unreliable(&peer->link, net->channel, net->data, net->size, session->payload.data(),
                                       session->payload.size(), &payload_size))
@@ -183,6 +183,17 @@ bool net_session_poll(NetSession* session, NetSessionEvent* event)
             event->address = net.address;
             event->discovered = net.discovered;
             return true;
+        case NetEventType::beacon:
+            event->type = NetSessionEventType::beacon;
+            event->address = net.address;
+            event->beacon = net.beacon;
+            return true;
+        case NetEventType::signal:
+            event->type = NetSessionEventType::signal;
+            event->peer = net.peer;
+            event->data = net.data;
+            event->size = net.size;
+            return true;
         case NetEventType::connected:
             on_connected(session, &net);
             break;
@@ -236,6 +247,38 @@ bool net_session_connect(NetSession* session, NetAddress address, uint32_t* peer
     *slot = {};
     slot->initiator = true;   // on_connected starts the handshake
     return true;
+}
+
+bool net_session_enable_rtc(NetSession* session, const char* stun)
+{
+    return net_host_enable_rtc(&session->host, stun);
+}
+
+static bool rtc_started(NetSession* session, uint32_t peer, bool initiator)
+{
+    NetSessionPeer* slot = peer_get(session, peer);
+    if (slot == nullptr)
+    {
+        return false;
+    }
+    *slot = {};
+    slot->initiator = initiator;   // on_connected starts the handshake when it's ours
+    return true;
+}
+
+bool net_session_rtc_connect(NetSession* session, uint32_t* peer)
+{
+    return net_host_rtc_connect(&session->host, peer) && rtc_started(session, *peer, true);
+}
+
+bool net_session_rtc_accept(NetSession* session, uint32_t* peer)
+{
+    return net_host_rtc_accept(&session->host, peer) && rtc_started(session, *peer, false);
+}
+
+bool net_session_rtc_signal(NetSession* session, uint32_t peer, const uint8_t* data, size_t size)
+{
+    return net_host_rtc_signal(&session->host, peer, data, size);
 }
 
 bool net_session_send(NetSession* session, uint32_t peer, NetChannel channel, const uint8_t* data, size_t size)

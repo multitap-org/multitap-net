@@ -24,6 +24,8 @@
 #include <string>
 #include <vector>
 
+#include "net_beacon.h"
+#include "net_signal.h"
 #include "net_pairing.h"
 #include "net_session.h"
 #include "net_trust.h"
@@ -91,6 +93,8 @@ struct NetAccess
     uint32_t      dropped_by_access = 0;   // messages a device's level didn't cover
     NetAccessPeer peers[NET_MAX_PEERS];
     std::vector<uint8_t> out;        // messages we write (sized at creation)
+    NetBeaconHost beacon;            // across the internet (off until net_access_set_beacon)
+    NetSignal     signal;            // WebRTC signaling, for browsers (off until net_access_set_signal)
 };
 
 // `trust_path`: the paired devices file (loaded now, saved on every change).
@@ -119,6 +123,17 @@ void net_access_remove_device(NetAccess* access, uint32_t device);
 void net_access_set_level(NetAccess* access, uint32_t device, NetAccessLevel level);
 // How the connection to an authorized peer is doing (ping). False if it isn't.
 bool net_access_peer_stats(const NetAccess* access, uint32_t peer, NetLinkStats* stats);
+// Reliable bytes still on their way to that peer (net_host_peer_pending).
+size_t net_access_peer_pending(const NetAccess* access, uint32_t peer);
 bool net_access_peer_address(const NetAccess* access, uint32_t peer, NetAddress* address);
 // Is this peer connected and authorized as that device?
 bool net_access_device_connected(const NetAccess* access, uint32_t device);
+
+// Paired devices may reach this host across the internet through a beacon
+// (net_beacon.h): `servers` = its addresses (net_address_resolve), count 0 = off.
+void net_access_set_beacon(NetAccess* access, const NetAddress* servers, uint32_t count);
+NetBeaconStatus net_access_beacon_status(const NetAccess* access);
+// Browsers too (WebRTC): the beacon's signaling `url` (net_signal_url) and its
+// STUN (net_signal_stun); "" turns it off. False if this build has no WebRTC.
+bool net_access_set_signal(NetAccess* access, const char* url, const char* stun);
+NetSignalStatus net_access_signal_status(const NetAccess* access);

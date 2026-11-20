@@ -38,6 +38,8 @@ enum class NetSessionEventType
     secured,      // handshake done: `peer`, `remote_key`, `handshake_hash`
     message,      // `data`/`size` on `channel` from a secured `peer`
     closed,       // `peer` is gone (`was_secured`: whether `secured` was ever reported)
+    beacon,       // a beacon message (`beacon`, from `address`; net_beacon.h)
+    signal,       // WebRTC: a blob for the other side of `peer` (`data`/`size`), to send by signaling
 };
 
 struct NetSessionEvent
@@ -52,6 +54,7 @@ struct NetSessionEvent
     uint8_t        remote_key[NET_KEY_SIZE] = {};
     uint8_t        handshake_hash[NET_HASH_SIZE] = {};
     NetDiscoveryReply discovered;
+    BeaconMessage  beacon;
 };
 
 struct NetSession
@@ -79,6 +82,13 @@ bool net_session_connect(NetSession* session, NetAddress address, uint32_t* peer
 // Only to a secured peer; at most NET_LINK_MAX_PAYLOAD bytes.
 bool net_session_send(NetSession* session, uint32_t peer, NetChannel channel, const uint8_t* data, size_t size);
 void net_session_close(NetSession* session, uint32_t peer);
+
+// WebRTC (net_host.h): the same session over data channels. The side that
+// offers is the Noise initiator, like the side that connects over ENet.
+bool net_session_enable_rtc(NetSession* session, const char* stun);
+bool net_session_rtc_connect(NetSession* session, uint32_t* peer);
+bool net_session_rtc_accept(NetSession* session, uint32_t* peer);
+bool net_session_rtc_signal(NetSession* session, uint32_t peer, const uint8_t* data, size_t size);
 
 // Seconds on a steady clock (for network timers).
 double net_seconds();
