@@ -10,12 +10,18 @@ static constexpr uint32_t CLASS_COUNT = sizeof(CLASS_SIZES) / sizeof(CLASS_SIZES
 static constexpr uint32_t LARGE = CLASS_COUNT;   // the header's class for malloc'd blocks
 
 // Every block starts with this header, so free() knows where it goes. 16
-// bytes keep the memory after it aligned like malloc's.
+// bytes keep the memory after it aligned like malloc's. The link shares 8
+// bytes with a uint64_t so the size is the same on 32-bit machines (armv7:
+// the Android 5 APK), where a pointer is 4 bytes.
 struct BlockHeader
 {
-    uint32_t     size_class = 0;
-    uint32_t     unused = 0;
-    BlockHeader* next = nullptr;   // in a free list
+    uint32_t size_class = 0;
+    uint32_t unused = 0;
+    union
+    {
+        BlockHeader* next = nullptr;   // in a free list
+        uint64_t     next_space;
+    };
 };
 static_assert(sizeof(BlockHeader) == 16, "the header keeps 16-byte alignment");
 
