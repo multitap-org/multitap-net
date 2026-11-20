@@ -463,3 +463,12 @@ bool net_client_stats(const NetClient* client, NetLinkStats* stats)
     }
     return net_host_peer_stats(&client->session.host, client->peer, stats);
 }
+
+size_t net_client_pending(const NetClient* client)
+{
+    if (client->state != NetClientState::ready)
+    {
+        return 0;
+    }
+    return net_host_peer_pending(&client->session.host, client->peer);
+}

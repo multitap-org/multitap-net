@@ -121,6 +121,8 @@ void net_access_remove_device(NetAccess* access, uint32_t device);
 void net_access_set_level(NetAccess* access, uint32_t device, NetAccessLevel level);
 // How the connection to an authorized peer is doing (ping). False if it isn't.
 bool net_access_peer_stats(const NetAccess* access, uint32_t peer, NetLinkStats* stats);
+// Reliable bytes still on their way to that peer (net_host_peer_pending).
+size_t net_access_peer_pending(const NetAccess* access, uint32_t peer);
 bool net_access_peer_address(const NetAccess* access, uint32_t peer, NetAddress* address);
 // Is this peer connected and authorized as that device?
 bool net_access_device_connected(const NetAccess* access, uint32_t device);
