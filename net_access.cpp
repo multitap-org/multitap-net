@@ -448,6 +448,7 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
         {
         case NetSessionEventType::none:
         case NetSessionEventType::discovered:
+        case NetSessionEventType::signal:   // WebRTC signaling: carried by the beacon (next step)
             break;
         case NetSessionEventType::beacon:
             net_beacon_host_receive(&access->beacon, &access->session.host, &session_event.beacon,

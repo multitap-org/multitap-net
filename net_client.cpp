@@ -347,6 +347,7 @@ bool net_client_poll(NetClient* client, NetClientEvent* event)
         case NetSessionEventType::none:
         case NetSessionEventType::discovered:
         case NetSessionEventType::beacon:
+        case NetSessionEventType::signal:   // WebRTC signaling: carried by the beacon (next step)
             break;
         case NetSessionEventType::secured:
             std::memcpy(client->host_key, session_event.remote_key, NET_KEY_SIZE);

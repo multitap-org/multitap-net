@@ -38,6 +38,7 @@
 
 struct _ENetHost;
 struct _ENetPacket;
+struct NetRtc;
 
 constexpr uint16_t NET_DEFAULT_PORT = 55420;
 constexpr uint32_t NET_MAX_PEERS = 8;
@@ -70,6 +71,23 @@ enum class NetEventType
     received,       // `data`/`size` on `channel`, from `peer`
     discovered,     // a discovery reply (`discovered`, from `address`)
     beacon,         // a beacon message (`beacon`, from `address`): from a beacon server or a PUNCH from a peer
+    signal,         // WebRTC: a blob (`data`/`size`) for the other side of `peer`, to send by signaling
+};
+
+// How a peer is connected. The same channels and bytes either way; only
+// NetHost knows (Andrés: the flow is the same over RTC or UDP).
+enum class NetTransport : uint8_t
+{
+    enet,   // UDP, our own socket (LAN, beacon hole punching)
+    rtc,    // WebRTC data channels (browsers; net_rtc.h)
+};
+
+// A peer number as everything above NetHost sees it, and what it is below.
+struct NetHostSlot
+{
+    bool         used = false;
+    NetTransport transport = NetTransport::enet;
+    uint32_t     index = 0;   // the backend's peer number
 };
 
 struct NetEvent
@@ -98,6 +116,10 @@ struct NetHost
     BeaconMessage beacon_queue[NET_MAX_BEACON_QUEUED];
     NetAddress  beacon_from[NET_MAX_BEACON_QUEUED];
     uint32_t    beacon_count = 0;
+    NetHostSlot slots[NET_MAX_PEERS];
+    uint32_t    enet_slot[NET_MAX_PEERS];   // ENet peer -> slot (NET_NO_PEER)
+    uint32_t    rtc_slot[NET_MAX_PEERS];    // WebRTC peer -> slot (NET_NO_PEER)
+    NetRtc*     rtc = nullptr;              // WebRTC, once net_host_enable_rtc
 };
 
 // ENet's global setup (WSAStartup on Windows). Counted: each successful
@@ -147,6 +169,20 @@ bool net_host_peer_address(const NetHost* host, uint32_t peer, NetAddress* addre
 
 // Polite: queued data is sent first, then `disconnected` follows.
 void net_host_disconnect(NetHost* host, uint32_t peer);
+NetTransport net_host_peer_transport(const NetHost* host, uint32_t peer);
+
+// --- WebRTC (net_rtc.h): the same peers, through data channels -----------
+// Signaling is the caller's: `signal` events carry blobs for the other side,
+// and what it sends back goes in through net_host_rtc_signal.
+
+// False if this build has no WebRTC. `stun` = "stun:host:port" or nullptr.
+bool net_host_enable_rtc(NetHost* host, const char* stun);
+// The side that offers (client): its offer comes out as a `signal` event.
+bool net_host_rtc_connect(NetHost* host, uint32_t* peer);
+// The side that answers (host), for an offer that came by signaling (feed it
+// in with net_host_rtc_signal next).
+bool net_host_rtc_accept(NetHost* host, uint32_t* peer);
+bool net_host_rtc_signal(NetHost* host, uint32_t peer, const uint8_t* data, size_t size);
 
 // "192.168.1.20", "2001:db8::5", "[2001:db8::5]", "fe80::1%wlan0" or a host
 // name (resolved, may block; the first address it has) -> address.

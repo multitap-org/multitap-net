@@ -1,5 +1,6 @@
 #include "net_host.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -9,6 +10,7 @@
 
 #include "host_log.h"
 #include "net_memory.h"
+#include "net_rtc.h"
 
 // ENet's own global setup is process-wide; we count our users of it.
 static uint32_t g_init_count = 0;
@@ -175,8 +177,64 @@ void net_shutdown()
     }
 }
 
+static void slots_reset(NetHost* host)
+{
+    for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
+    {
+        host->slots[i] = {};
+        host->enet_slot[i] = NET_NO_PEER;
+        host->rtc_slot[i] = NET_NO_PEER;
+    }
+}
+
+static uint32_t slot_take(NetHost* host, NetTransport transport, uint32_t index)
+{
+    uint32_t* map = transport == NetTransport::enet ? host->enet_slot : host->rtc_slot;
+    if (index >= NET_MAX_PEERS)
+    {
+        return NET_NO_PEER;
+    }
+    if (map[index] != NET_NO_PEER)
+    {
+        return map[index];
+    }
+    for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
+    {
+        if (!host->slots[i].used)
+        {
+            host->slots[i].used = true;
+            host->slots[i].transport = transport;
+            host->slots[i].index = index;
+            map[index] = i;
+            return i;
+        }
+    }
+    return NET_NO_PEER;
+}
+
+static void slot_free(NetHost* host, uint32_t slot)
+{
+    if (slot >= NET_MAX_PEERS || !host->slots[slot].used)
+    {
+        return;
+    }
+    uint32_t* map = host->slots[slot].transport == NetTransport::enet ? host->enet_slot : host->rtc_slot;
+    map[host->slots[slot].index] = NET_NO_PEER;
+    host->slots[slot] = {};
+}
+
+static const NetHostSlot* slot_get(const NetHost* host, uint32_t peer)
+{
+    if (peer >= NET_MAX_PEERS || !host->slots[peer].used)
+    {
+        return nullptr;
+    }
+    return &host->slots[peer];
+}
+
 static bool host_create(NetHost* host, const ENetAddress* bind_address)
 {
+    slots_reset(host);
     host->enet = enet_host_create(bind_address, NET_MAX_PEERS, NET_CHANNEL_COUNT, 0, 0);
     if (host->enet == nullptr)
     {
@@ -217,6 +275,8 @@ bool net_host_create_client(NetHost* host)
 
 void net_host_destroy(NetHost* host)
 {
+    net_rtc_destroy(host->rtc);
+    host->rtc = nullptr;
     if (host->held_packet != nullptr)
     {
         enet_packet_destroy(host->held_packet);
@@ -238,7 +298,7 @@ uint16_t net_host_port(const NetHost* host)
     return host->enet->address.port;
 }
 
-static uint32_t peer_index(const NetHost* host, const ENetPeer* peer)
+static uint32_t enet_index(const NetHost* host, const ENetPeer* peer)
 {
     return static_cast<uint32_t>(peer - host->enet->peers);
 }
@@ -280,6 +340,56 @@ static bool take_beacon(NetHost* host, NetEvent* event)
     return true;
 }
 
+// Seconds on a steady clock (net_rtc's connect timeout).
+static double net_host_clock()
+{
+    std::chrono::steady_clock::duration since = std::chrono::steady_clock::now().time_since_epoch();
+    return std::chrono::duration<double>(since).count();
+}
+
+// WebRTC's events, after ENet's (nothing when it isn't enabled).
+static bool poll_rtc(NetHost* host, NetEvent* event)
+{
+    if (host->rtc == nullptr)
+    {
+        return false;
+    }
+    NetRtcEvent rtc_event;
+    while (net_rtc_poll(host->rtc, &rtc_event, net_host_clock()))
+    {
+        uint32_t slot = host->rtc_slot[rtc_event.index];
+        if (slot == NET_NO_PEER)
+        {
+            continue;   // a peer we already let go
+        }
+        event->peer = slot;
+        switch (rtc_event.type)
+        {
+        case NetRtcEventType::none:
+            continue;
+        case NetRtcEventType::connected:
+            event->type = NetEventType::connected;
+            return true;
+        case NetRtcEventType::disconnected:
+            slot_free(host, slot);
+            event->type = NetEventType::disconnected;
+            return true;
+        case NetRtcEventType::received:
+            event->type = NetEventType::received;
+            event->channel = rtc_event.channel;
+            event->data = rtc_event.data;
+            event->size = rtc_event.size;
+            return true;
+        case NetRtcEventType::signal:
+            event->type = NetEventType::signal;
+            event->data = rtc_event.data;
+            event->size = rtc_event.size;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool net_host_poll(NetHost* host, NetEvent* event)
 {
     *event = {};
@@ -290,7 +400,7 @@ bool net_host_poll(NetHost* host, NetEvent* event)
     }
     if (host->enet == nullptr)
     {
-        return false;
+        return poll_rtc(host, event);
     }
     if (take_discovered(host, event) || take_beacon(host, event))
     {
@@ -309,21 +419,39 @@ bool net_host_poll(NetHost* host, NetEvent* event)
     if (result == 0)
     {
         // The intercept may have queued replies during this call.
-        return take_discovered(host, event) || take_beacon(host, event);
+        return take_discovered(host, event) || take_beacon(host, event) || poll_rtc(host, event);
     }
 
-    event->peer = peer_index(host, enet_event.peer);
+    uint32_t index = enet_index(host, enet_event.peer);
     event->address = address_from_enet(&enet_event.peer->address);
     switch (enet_event.type)
     {
     case ENET_EVENT_TYPE_CONNECT:
+        event->peer = slot_take(host, NetTransport::enet, index);
+        if (event->peer == NET_NO_PEER)
+        {
+            enet_peer_reset(enet_event.peer);   // every slot taken (by WebRTC peers too)
+            return poll_rtc(host, event);
+        }
         event->type = NetEventType::connected;
         break;
     case ENET_EVENT_TYPE_DISCONNECT:
     case ENET_EVENT_TYPE_DISCONNECT_TIMEOUT:   // zpl-c's ENet tells a timeout apart; same to us
+        event->peer = host->enet_slot[index];
+        if (event->peer == NET_NO_PEER)
+        {
+            return poll_rtc(host, event);
+        }
+        slot_free(host, event->peer);
         event->type = NetEventType::disconnected;
         break;
     case ENET_EVENT_TYPE_RECEIVE:
+        event->peer = host->enet_slot[index];
+        if (event->peer == NET_NO_PEER)
+        {
+            enet_packet_destroy(enet_event.packet);
+            return poll_rtc(host, event);
+        }
         event->type = NetEventType::received;
         event->channel = static_cast<NetChannel>(enet_event.channelID);
         event->data = enet_event.packet->data;
@@ -331,7 +459,7 @@ bool net_host_poll(NetHost* host, NetEvent* event)
         host->held_packet = enet_event.packet;
         break;
     case ENET_EVENT_TYPE_NONE:
-        return false;
+        return poll_rtc(host, event);
     }
     return true;
 }
@@ -400,22 +528,41 @@ bool net_host_connect(NetHost* host, NetAddress address, uint32_t* peer)
         host_log(LogLevel::warning, "Network: no free peer slot to connect");
         return false;
     }
-    *peer = peer_index(host, enet_peer);
+    *peer = slot_take(host, NetTransport::enet, enet_index(host, enet_peer));
+    if (*peer == NET_NO_PEER)
+    {
+        enet_peer_reset(enet_peer);
+        host_log(LogLevel::warning, "Network: no free peer slot to connect");
+        return false;
+    }
     return true;
 }
 
-static ENetPeer* peer_get(NetHost* host, uint32_t peer)
+// The ENet peer behind a slot, or nullptr (no such peer, or it's WebRTC).
+static ENetPeer* enet_peer_of(const NetHost* host, uint32_t peer)
 {
-    if (host->enet == nullptr || peer >= host->enet->peerCount)
+    const NetHostSlot* slot = slot_get(host, peer);
+    if (host->enet == nullptr || slot == nullptr || slot->transport != NetTransport::enet ||
+        slot->index >= host->enet->peerCount)
     {
         return nullptr;
     }
-    return &host->enet->peers[peer];
+    return &host->enet->peers[slot->index];
+}
+
+static bool is_rtc(const NetHost* host, uint32_t peer)
+{
+    const NetHostSlot* slot = slot_get(host, peer);
+    return slot != nullptr && slot->transport == NetTransport::rtc && host->rtc != nullptr;
 }
 
 bool net_host_send(NetHost* host, uint32_t peer, NetChannel channel, const uint8_t* data, size_t size)
 {
-    ENetPeer* enet_peer = peer_get(host, peer);
+    if (is_rtc(host, peer))
+    {
+        return net_rtc_send(host->rtc, host->slots[peer].index, channel, data, size);
+    }
+    ENetPeer* enet_peer = enet_peer_of(host, peer);
     if (enet_peer == nullptr || enet_peer->state != ENET_PEER_STATE_CONNECTED)
     {
         return false;
@@ -437,12 +584,14 @@ bool net_host_send(NetHost* host, uint32_t peer, NetChannel channel, const uint8
 
 bool net_host_peer_stats(const NetHost* host, uint32_t peer, NetLinkStats* stats)
 {
-    if (host->enet == nullptr || peer >= host->enet->peerCount)
+    if (is_rtc(host, peer))
     {
-        return false;
+        // libdatachannel's C API has no round trip: shown as 0 (unknown) for now.
+        *stats = {};
+        return net_rtc_connected(host->rtc, host->slots[peer].index);
     }
-    const ENetPeer* enet_peer = &host->enet->peers[peer];
-    if (enet_peer->state != ENET_PEER_STATE_CONNECTED)
+    const ENetPeer* enet_peer = enet_peer_of(host, peer);
+    if (enet_peer == nullptr || enet_peer->state != ENET_PEER_STATE_CONNECTED)
     {
         return false;
     }
@@ -454,22 +603,78 @@ bool net_host_peer_stats(const NetHost* host, uint32_t peer, NetLinkStats* stats
 
 bool net_host_peer_address(const NetHost* host, uint32_t peer, NetAddress* address)
 {
-    if (host->enet == nullptr || peer >= host->enet->peerCount ||
-        host->enet->peers[peer].state != ENET_PEER_STATE_CONNECTED)
+    const ENetPeer* enet_peer = enet_peer_of(host, peer);
+    if (enet_peer == nullptr || enet_peer->state != ENET_PEER_STATE_CONNECTED)
     {
-        return false;
+        return false;   // WebRTC peers too: their address is the browser's business
     }
-    *address = address_from_enet(&host->enet->peers[peer].address);
+    *address = address_from_enet(&enet_peer->address);
     return true;
 }
 
 void net_host_disconnect(NetHost* host, uint32_t peer)
 {
-    ENetPeer* enet_peer = peer_get(host, peer);
+    if (is_rtc(host, peer))
+    {
+        net_rtc_close(host->rtc, host->slots[peer].index);
+        return;
+    }
+    ENetPeer* enet_peer = enet_peer_of(host, peer);
     if (enet_peer != nullptr)
     {
         enet_peer_disconnect_later(enet_peer, 0);
     }
+}
+
+NetTransport net_host_peer_transport(const NetHost* host, uint32_t peer)
+{
+    const NetHostSlot* slot = slot_get(host, peer);
+    return slot != nullptr ? slot->transport : NetTransport::enet;
+}
+
+bool net_host_enable_rtc(NetHost* host, const char* stun)
+{
+    if (host->rtc != nullptr)
+    {
+        return true;
+    }
+    if (!net_rtc_available())
+    {
+        return false;
+    }
+    host->rtc = net_rtc_create(stun);
+    return host->rtc != nullptr;
+}
+
+static bool rtc_open(NetHost* host, bool accept, uint32_t* peer)
+{
+    uint32_t index = 0;
+    if (host->rtc == nullptr || !(accept ? net_rtc_accept(host->rtc, &index) : net_rtc_connect(host->rtc, &index)))
+    {
+        return false;
+    }
+    *peer = slot_take(host, NetTransport::rtc, index);
+    if (*peer == NET_NO_PEER)
+    {
+        net_rtc_close(host->rtc, index);
+        return false;
+    }
+    return true;
+}
+
+bool net_host_rtc_connect(NetHost* host, uint32_t* peer)
+{
+    return rtc_open(host, false, peer);
+}
+
+bool net_host_rtc_accept(NetHost* host, uint32_t* peer)
+{
+    return rtc_open(host, true, peer);
+}
+
+bool net_host_rtc_signal(NetHost* host, uint32_t peer, const uint8_t* data, size_t size)
+{
+    return is_rtc(host, peer) && net_rtc_signal(host->rtc, host->slots[peer].index, data, size);
 }
 
 bool net_address_from_text(const char* text, uint16_t port, NetAddress* address)
