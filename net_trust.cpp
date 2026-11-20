@@ -21,6 +21,8 @@ const char* net_access_level_name(NetAccessLevel level)
         return "stream";
     case NetAccessLevel::full:
         return "full";
+    case NetAccessLevel::owner:
+        return "owner";
     }
     return "gamepad";
 }

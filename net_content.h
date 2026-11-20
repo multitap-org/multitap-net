@@ -1,7 +1,7 @@
 #pragma once
 
 // Games from a client (netcode milestone 5): a paired device with FULL access
-// (net_pairing.h: message types 128 and up) browses the host's game folders
+// (net_pairing.h: message types 128..191) browses the host's game folders
 // and asks it to start a game with one of its cores.
 //
 // Paths the client sees are virtual, never the host's own: the first part

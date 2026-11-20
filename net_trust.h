@@ -12,7 +12,8 @@
 // allowed in; on a client: the hosts it paired with), one section each:
 //   [device:<public key, 64 hex digits>]
 //   name = Ana's phone   what the device calls itself (sent at every connection)
-//   access = gamepad     what it may do here: gamepad, stream or full
+//   access = gamepad     what it may do here: gamepad, stream, full or owner
+//                        (an older build reads owner as unknown: gamepad, the safe side)
 //   paired = 2026-11-19
 // (Lists from before access: "own = true" reads as full, anything else as gamepad.)
 // A key is the identity: the name is only shown, never trusted for anything.
@@ -33,10 +34,11 @@ enum class NetAccessLevel : uint8_t
     gamepad = 0,   // play with its pads (and the game's hotkeys)
     stream = 1,    // + receive the game's video and audio (remote play)
     full = 2,      // + configure the frontend, browse and load games, take the game (headless)
+    owner = 3,     // + read and write files in the shared folders (piccolo-share, 2026-11-20)
 };
-constexpr uint32_t NET_ACCESS_LEVEL_COUNT = 3;
+constexpr uint32_t NET_ACCESS_LEVEL_COUNT = 4;
 
-const char* net_access_level_name(NetAccessLevel level);   // "gamepad", "stream", "full"
+const char* net_access_level_name(NetAccessLevel level);   // "gamepad", "stream", "full", "owner"
 bool net_access_level_parse(const char* name, NetAccessLevel* level);
 
 struct NetTrustedDevice
