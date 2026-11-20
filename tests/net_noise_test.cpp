@@ -12,6 +12,7 @@
 // Exit code 0 = all checks passed. Each failure is printed.
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
