@@ -283,6 +283,9 @@ bool net_host_create_client(NetHost* host)
     return true;
 }
 
+static void send_host_frame(NetHost* host, uint32_t index, uint8_t type, uint32_t seq, uint32_t time_ms);
+constexpr uint8_t HOST_FRAME_BYE = 1;   // (NetHost's own frames: see poll_rtc)
+
 void net_host_destroy(NetHost* host)
 {
     // WebRTC peers still connected get a bye, and a moment for it to leave
@@ -388,7 +391,6 @@ static double net_host_clock()
 // noticed a vanished host only after ~15 s) and its C API has no round
 // trip: hence these.
 constexpr size_t  HOST_FRAME_SIZE = 16;
-constexpr uint8_t HOST_FRAME_BYE = 1;
 constexpr uint8_t HOST_FRAME_PING = 2;
 constexpr uint8_t HOST_FRAME_PONG = 3;
 
