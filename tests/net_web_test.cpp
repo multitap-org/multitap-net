@@ -12,10 +12,18 @@
 //    NetAccess with signaling only and NetClient through
 //    net_client_connect_beacon, until both are ready over WebRTC.
 //
-// 3. Mixed (by hand, argv[2]): "host" runs a NetAccess with a fixed key (the
-//    native build, frontend_net_web_host: libdatachannel), "client" a
-//    NetClient with the matching fixed key (the page): a browser meets a
-//    native piccolo, the phone <-> browser case.
+// 3. Mixed (by hand, argv[2]): "host" runs a NetAccess with a fixed key,
+//    "client" a NetClient with the matching fixed key. Either side may be
+//    the page or the native build (frontend_net_web_host: libdatachannel),
+//    so both directions are checked:
+//      - native host, page client: a browser meets a native piccolo (the
+//        phone <-> browser case);
+//      - page host, native client: a native piccolo meets a browser one
+//        (NetClient tries UDP through the beacon first, the browser only
+//        signals: it must fall back to WebRTC).
+//    argv[3] is the folder for the trust files. A native client also takes
+//    the beacon's UDP address (argv[4], 127.0.0.1:47430) and tries UDP
+//    first, as piccolo does; the page has no UDP.
 //
 // The result goes to the console and the page title ("PASS" / "FAIL", from
 // the exit status).
@@ -28,9 +36,21 @@
 
 #include "host_fs.h"
 #include "net_access.h"
+#include "net_beacon.h"
 #include "net_client.h"
 #include "net_pair_link.h"
 #include "net_rtc.h"
+
+// The names each side shows (the logs, the other side's trust file).
+#ifdef __EMSCRIPTEN__
+constexpr const char* FIXED_HOST_NAME = "BROWSER HOST";
+constexpr const char* FIXED_CLIENT_NAME = "BROWSER CLIENT";
+constexpr const char* FIXED_DIR_DEFAULT = "/tmp/net_web";
+#else
+constexpr const char* FIXED_HOST_NAME = "NATIVE HOST";
+constexpr const char* FIXED_CLIENT_NAME = "NATIVE CLIENT";
+constexpr const char* FIXED_DIR_DEFAULT = "net_web";
+#endif
 
 static int g_failures = 0;
 
@@ -292,11 +312,11 @@ static int run_fixed_host(const char* url, const char* dir)
     host_fs_make_directories(dir);
     std::string devices = std::string(dir) + "/host_devices.cfg";
     NetTrust trust;
-    net_trust_add(&trust, client_key.public_key, "BROWSER");
+    net_trust_add(&trust, client_key.public_key, "FIXED CLIENT");
     net_trust_save(&trust, devices.c_str());
     NetAccess* access = new NetAccess();
-    check(net_access_create(access, 0, "NATIVE HOST", &host_key, devices.c_str()), "native host created");
-    check(net_access_set_signal(access, url, nullptr), "native host signals");
+    check(net_access_create(access, 0, FIXED_HOST_NAME, &host_key, devices.c_str()), "fixed host created");
+    check(net_access_set_signal(access, url, nullptr), "fixed host signals");
     bool authorized = false;
     for (int i = 0; i < 60000 / 5 && !authorized; i++)
     {
@@ -307,7 +327,7 @@ static int run_fixed_host(const char* url, const char* dir)
         }
         sleep_ms(5);
     }
-    check(authorized, "the browser connected and was authorized");
+    check(authorized, "the fixed client connected and was authorized");
     for (int i = 0; i < 200; i++)   // a moment for the client to see ready
     {
         NetAccessEvent event;
@@ -323,19 +343,27 @@ static int run_fixed_host(const char* url, const char* dir)
 
 // `wait_close`: after ready, stay until the connection is reported closed
 // (the host killed by hand: how long it takes to notice).
-static void run_fixed_client(const char* url, bool wait_close)
+static void run_fixed_client(const char* url, const char* dir, const char* udp_server, bool wait_close)
 {
     NetKeypair host_key;
     NetKeypair client_key;
     fixed_keys(&host_key, &client_key);
-    host_fs_make_directories("/tmp/net_web");
+    host_fs_make_directories(dir);
+    std::string hosts_file = std::string(dir) + "/fixed_hosts.cfg";
     NetTrust hosts;
-    net_trust_add(&hosts, host_key.public_key, "NATIVE HOST");
-    net_trust_save(&hosts, "/tmp/net_web/fixed_hosts.cfg");
+    net_trust_add(&hosts, host_key.public_key, "FIXED HOST");
+    net_trust_save(&hosts, hosts_file.c_str());
     NetClient* client = new NetClient();
-    check(net_client_create(client, &client_key, "BROWSER", "/tmp/net_web/fixed_hosts.cfg"), "browser client created");
+    check(net_client_create(client, &client_key, FIXED_CLIENT_NAME, hosts_file.c_str()), "fixed client created");
     net_client_set_signal(client, url, nullptr);
-    check(net_client_connect_beacon(client, nullptr, 0, 0), "browser meets the native host");
+    NetAddress servers[4];
+    uint32_t count = 0;
+    if (udp_server != nullptr && udp_server[0] != '\0')
+    {
+        count = net_address_resolve(udp_server, NET_BEACON_DEFAULT_PORT, servers);
+        check(count > 0, "the beacon's UDP address resolved");
+    }
+    check(net_client_connect_beacon(client, servers, count, 0), "fixed client looks for the fixed host");
     bool ready = false;
     bool refused = false;
     for (int i = 0; i < 4000 && !ready && !refused; i++)
@@ -352,7 +380,7 @@ static void run_fixed_client(const char* url, bool wait_close)
         }
         sleep_ms(5);
     }
-    check(ready, "browser ready with the native host (libdatachannel <-> browser)");
+    check(ready, "fixed client ready with the fixed host");
     if (ready && wait_close)
     {
         std::printf("ready: now kill the host (60 s at most)\n");
@@ -381,14 +409,15 @@ int main(int argc, char** argv)
     const char* mode = argc > 2 ? argv[2] : "";
     if (std::strcmp(mode, "host") == 0)
     {
-        int status = run_fixed_host(url, argc > 3 ? argv[3] : "net_web_host");
+        int status = run_fixed_host(url, argc > 3 ? argv[3] : FIXED_DIR_DEFAULT);
         net_shutdown();
         std::printf(status == 0 ? "net web host: all checks passed\n" : "net web host: failed\n");
         return status;
     }
     if (std::strcmp(mode, "client") == 0 || std::strcmp(mode, "client-wait") == 0)
     {
-        run_fixed_client(url, std::strcmp(mode, "client-wait") == 0);
+        run_fixed_client(url, argc > 3 ? argv[3] : FIXED_DIR_DEFAULT, argc > 4 ? argv[4] : nullptr,
+                         std::strcmp(mode, "client-wait") == 0);
     }
     else
     {
