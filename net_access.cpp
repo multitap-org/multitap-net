@@ -610,6 +610,34 @@ NetBeaconStatus net_access_beacon_status(const NetAccess* access)
     return net_beacon_host_status(&access->beacon, net_seconds());
 }
 
+NetBeaconStatus net_access_internet_status(const NetAccess* access)
+{
+    NetBeaconStatus udp = net_access_beacon_status(access);
+    NetSignalStatus signal = net_access_signal_status(access);
+    if (udp == NetBeaconStatus::registered || udp == NetBeaconStatus::symmetric_nat)
+    {
+        return udp;
+    }
+    if (signal == NetSignalStatus::ready)
+    {
+        return NetBeaconStatus::registered;
+    }
+    if (udp == NetBeaconStatus::off || udp == NetBeaconStatus::unreachable)
+    {
+        // Signaling still trying is worth "waiting" over a UDP side that's
+        // off (the browser) or got no answer.
+        if (signal == NetSignalStatus::connecting)
+        {
+            return NetBeaconStatus::waiting;
+        }
+        if (signal == NetSignalStatus::unreachable)
+        {
+            return NetBeaconStatus::unreachable;
+        }
+    }
+    return udp;
+}
+
 size_t net_access_peer_pending(const NetAccess* access, uint32_t peer)
 {
     return net_host_peer_pending(&access->session.host, peer);
