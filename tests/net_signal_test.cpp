@@ -143,7 +143,7 @@ int main(int argc, char** argv)
     net_signal_host_start(&host->signal, url.c_str());
     uint8_t devices[1][NET_KEY_SIZE];
     std::memcpy(devices[0], client_key.public_key, NET_KEY_SIZE);
-    net_signal_host_set_rooms(&host->signal, &host_key, devices, 1);
+    net_signal_host_set_rooms(&host->signal, &host_key, devices, 1, false);
     bool host_ready = false;
     for (int i = 0; i < 400 && !host_ready; i++)
     {
@@ -282,6 +282,57 @@ int main(int argc, char** argv)
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     check(phone_ready && phone->via_signal, "UDP didn't find it; WebRTC did (ready)");
+
+    // Pairing through signaling (a browser with the pair link): the host's
+    // pairing room, the code, CPace over the data channels.
+    std::string tablet_hosts = dir + "/tablet_hosts.cfg";
+    NetTrust empty;
+    net_trust_save(&empty, tablet_hosts.c_str());
+    NetKeypair tablet_key;
+    net_keypair_generate(&tablet_key);
+    NetClient* tablet = new NetClient();
+    check(net_client_create(tablet, &tablet_key, "TABLET", tablet_hosts.c_str()), "tablet created");
+    net_client_set_signal(tablet, url.c_str(), nullptr);
+    check(net_access_open_pairing(access), "host opens pairing");
+    for (int i = 0; i < 40; i++)   // the pairing room's JOIN reaches the beacon
+    {
+        NetAccessEvent ignored;
+        while (net_access_poll(access, &ignored))
+        {
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    check(net_client_pair_beacon(tablet, nullptr, 0, host_key.public_key, access->code), "tablet pairs by signaling");
+    bool tablet_ready = false;
+    bool tablet_new = false;
+    bool host_paired = false;
+    for (int i = 0; i < 3000 && !(tablet_ready && host_paired); i++)
+    {
+        NetAccessEvent access_event;
+        while (net_access_poll(access, &access_event))
+        {
+            host_paired = host_paired || access_event.type == NetAccessEventType::paired;
+        }
+        NetClientEvent tablet_event;
+        while (net_client_poll(tablet, &tablet_event))
+        {
+            if (tablet_event.type == NetClientEventType::ready)
+            {
+                tablet_ready = true;
+                tablet_new = tablet_event.newly_paired;
+            }
+            if (tablet_event.type == NetClientEventType::refused)
+            {
+                std::printf("refused %d\n", static_cast<int>(tablet_event.refusal));
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    check(tablet_ready && tablet_new, "tablet paired over WebRTC");
+    check(host_paired, "host saw it pair");
+    net_client_destroy(tablet);
+    delete tablet;
+
     net_client_destroy(phone);
     net_access_destroy(access);
     delete phone;

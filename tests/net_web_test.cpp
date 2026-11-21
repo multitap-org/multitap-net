@@ -29,6 +29,7 @@
 #include "host_fs.h"
 #include "net_access.h"
 #include "net_client.h"
+#include "net_pair_link.h"
 #include "net_rtc.h"
 
 static int g_failures = 0;
@@ -224,6 +225,49 @@ static void test_flow(const char* url)
     check(phone_ready, "client ready (Noise over the browser's data channels)");
     check(access_authorized, "host authorized the paired device");
     check(net_host_peer_transport(&phone->session.host, phone->peer) == NetTransport::rtc, "over WebRTC");
+
+    // Pairing from the browser with the pair link (the host's key) and the code.
+    NetTrust empty;
+    net_trust_save(&empty, "/tmp/net_web/tablet_hosts.cfg");
+    NetKeypair tablet_key;
+    net_keypair_generate(&tablet_key);
+    NetClient* tablet = new NetClient();
+    check(net_client_create(tablet, &tablet_key, "TABLET", "/tmp/net_web/tablet_hosts.cfg"), "tablet created");
+    net_client_set_signal(tablet, url, nullptr);
+    std::string link = net_pair_link(host_key.public_key, nullptr);
+    uint8_t link_key[NET_KEY_SIZE];
+    std::string link_beacon;
+    check(net_pair_link_parse(link.c_str(), link_key, &link_beacon), "pair link read");
+    check(net_access_open_pairing(access), "host opens pairing");
+    for (int i = 0; i < 40; i++)
+    {
+        NetAccessEvent ignored;
+        while (net_access_poll(access, &ignored))
+        {
+        }
+        sleep_ms(5);
+    }
+    check(net_client_pair_beacon(tablet, nullptr, 0, link_key, access->code), "tablet pairs through the room");
+    bool tablet_ready = false;
+    bool host_paired = false;
+    for (int i = 0; i < 3000 && !(tablet_ready && host_paired); i++)
+    {
+        NetAccessEvent access_event;
+        while (net_access_poll(access, &access_event))
+        {
+            host_paired = host_paired || access_event.type == NetAccessEventType::paired;
+        }
+        NetClientEvent tablet_event;
+        while (net_client_poll(tablet, &tablet_event))
+        {
+            tablet_ready = tablet_ready || (tablet_event.type == NetClientEventType::ready && tablet_event.newly_paired);
+        }
+        sleep_ms(5);
+    }
+    check(tablet_ready && host_paired, "paired from the browser");
+    net_client_destroy(tablet);
+    delete tablet;
+
     net_client_destroy(phone);
     net_access_destroy(access);
     delete phone;

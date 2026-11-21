@@ -47,7 +47,7 @@ void net_access_destroy(NetAccess* access)
 static void beacon_refresh_ids(NetAccess* access)
 {
     std::vector<BeaconId> ids;
-    ids.reserve(access->trust.devices.size());
+    ids.reserve(access->trust.devices.size() + 1);
     for (size_t i = 0; i < access->trust.devices.size(); i++)
     {
         BeaconId id;
@@ -55,6 +55,13 @@ static void beacon_refresh_ids(NetAccess* access)
         {
             ids.push_back(id);
         }
+    }
+    if (access->pairing_open)
+    {
+        // The pairing room: a device with the pair link (our key) meets us there.
+        BeaconId id;
+        net_beacon_pair_id(access->session.identity.public_key, &id);
+        ids.push_back(id);
     }
     bool same = ids.size() == access->beacon.ids.size();
     for (size_t i = 0; same && i < ids.size(); i++)
@@ -72,7 +79,7 @@ static void beacon_refresh_ids(NetAccess* access)
         }
         net_signal_host_set_rooms(&access->signal, &access->session.identity,
                                   reinterpret_cast<const uint8_t(*)[NET_KEY_SIZE]>(keys.data()),
-                                  static_cast<uint32_t>(access->trust.devices.size()));
+                                  static_cast<uint32_t>(access->trust.devices.size()), access->pairing_open);
     }
 }
 
@@ -104,14 +111,20 @@ bool net_access_open_pairing(NetAccess* access)
         access->pairing_open = true;
         access->pairing_opened_at = net_seconds();
         access->pairing_failures = 0;
+        beacon_refresh_ids(access);   // the pairing room joins
     }
     return true;
 }
 
 void net_access_close_pairing(NetAccess* access)
 {
+    bool was_open = access->pairing_open;
     access->pairing_open = false;
     crypto_wipe(access->code, sizeof(access->code));
+    if (was_open)
+    {
+        beacon_refresh_ids(access);   // and leaves
+    }
 }
 
 double net_access_pairing_seconds_left(const NetAccess* access)

@@ -9,6 +9,8 @@
 
 static const char MEETING_ID_PREFIX[] = "multitap beacon v1";
 static const char SIGNAL_KEY_PREFIX[] = "multitap signal v1";
+static const char PAIR_ID_PREFIX[] = "multitap pair v1";
+static const char PAIR_SIGNAL_KEY_PREFIX[] = "multitap pair signal v1";
 
 // BLAKE2b(prefix || X25519(own, other)), `size` bytes. False for a shared
 // secret of all zeros (a key that can't be used).
@@ -43,6 +45,26 @@ bool net_beacon_meeting_id(const NetKeypair* own, const uint8_t* other_public_ke
 bool net_beacon_signal_key(const NetKeypair* own, const uint8_t* other_public_key, uint8_t* key)
 {
     return derive(own, other_public_key, SIGNAL_KEY_PREFIX, sizeof(SIGNAL_KEY_PREFIX) - 1, key, 32);
+}
+
+// BLAKE2b(prefix || host key), `size` bytes.
+static void derive_public(const uint8_t* host_key, const char* prefix, size_t prefix_size, uint8_t* out, size_t size)
+{
+    crypto_blake2b_ctx context;
+    crypto_blake2b_init(&context, size);
+    crypto_blake2b_update(&context, reinterpret_cast<const uint8_t*>(prefix), prefix_size);
+    crypto_blake2b_update(&context, host_key, NET_KEY_SIZE);
+    crypto_blake2b_final(&context, out);
+}
+
+void net_beacon_pair_id(const uint8_t* host_key, BeaconId* id)
+{
+    derive_public(host_key, PAIR_ID_PREFIX, sizeof(PAIR_ID_PREFIX) - 1, id->bytes, BEACON_ID_SIZE);
+}
+
+void net_beacon_pair_signal_key(const uint8_t* host_key, uint8_t* key)
+{
+    derive_public(host_key, PAIR_SIGNAL_KEY_PREFIX, sizeof(PAIR_SIGNAL_KEY_PREFIX) - 1, key, 32);
 }
 
 const char* net_beacon_status_name(NetBeaconStatus status)
@@ -370,7 +392,7 @@ bool net_beacon_host_receive(NetBeaconHost* beacon, NetHost* host, const BeaconM
         server->has_cookie = true;
         if (!server->registered)
         {
-            host_log(LogLevel::info, "Network: beacon has our %u paired device(s)",
+            host_log(LogLevel::info, "Network: beacon has our %u meeting id(s)",
                      static_cast<unsigned>(beacon->ids.size()));
         }
         // One REGISTERED per REGISTER; any refusal (server full, our limit) shows.
