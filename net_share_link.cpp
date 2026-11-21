@@ -5,6 +5,7 @@
 
 #include "host_log.h"
 #include "net_link.h"
+#include "net_pair_link.h"
 #include "net_share_host.h"
 
 static double seconds_now()
@@ -114,12 +115,36 @@ static void poll_client(NetShareLink* link)
             break;
         }
     }
-    if (link->connect_pending && link->client.state == NetClientState::idle)
+    // Through the beacon: once its addresses are known (run() looks them up).
+    bool waiting = link->connect_beacon && !link->resolved;
+    if (link->connect_pending && link->client.state == NetClientState::idle && !waiting)
     {
         link->connect_pending = false;
         link->closing = false;
-        bool started = net_client_connect(&link->client, link->connect_address,
-                                          link->connect_code.empty() ? nullptr : link->connect_code.c_str());
+        bool started = false;
+        if (!link->connect_beacon)
+        {
+            started = net_client_connect(&link->client, link->connect_address,
+                                         link->connect_code.empty() ? nullptr : link->connect_code.c_str());
+        }
+        else
+        {
+            const char* name = link->connect_beacon_name.c_str();
+            net_client_set_signal(&link->client, net_signal_url(name).c_str(), net_signal_stun(name).c_str());
+            if (link->connect_device >= 0)
+            {
+                started = net_client_connect_beacon(&link->client, link->servers, link->server_count,
+                                                    static_cast<uint32_t>(link->connect_device));
+            }
+            else
+            {
+                started = net_client_pair_beacon(&link->client, link->servers, link->server_count, link->connect_key,
+                                                 link->connect_code.c_str());
+            }
+            host_log(LogLevel::info, "Network: share: %s through %s (%u address(es))",
+                     link->connect_device >= 0 ? "connecting" : "pairing", name,
+                     static_cast<unsigned>(link->server_count));
+        }
         link->state = started ? NetShareLinkState::connecting : NetShareLinkState::idle;
         link->refusal = started ? NetClientRefusal::none : NetClientRefusal::connection;
     }
@@ -153,6 +178,27 @@ static void run(NetShareLink* link)
         {
             link->lock.unlock();
             return;
+        }
+        if (link->resolve_wanted)
+        {
+            // The beacon's name, looked up without the lock: DNS may block,
+            // and the frontend's calls mustn't wait for it.
+            link->resolve_wanted = false;
+            std::string name = link->connect_beacon_name;
+            link->lock.unlock();
+            NetAddress servers[NET_BEACON_MAX_SERVERS];
+            uint32_t count = net_address_resolve(name.c_str(), NET_BEACON_DEFAULT_PORT, servers);
+            link->lock.lock();
+            if (!link->resolve_wanted && link->connect_beacon_name == name)
+            {
+                // (A newer connect asked meanwhile looks up its own.)
+                for (uint32_t i = 0; i < count; i++)
+                {
+                    link->servers[i] = servers[i];
+                }
+                link->server_count = count;
+                link->resolved = true;
+            }
         }
         poll_client(link);
         discover(link, seconds_now());
@@ -258,10 +304,74 @@ bool net_share_link_connect(NetShareLink* link, NetAddress address, const char* 
     // Started by the thread once the client is idle (at its next poll, or
     // once the old connection is gone).
     link->connect_pending = true;
+    link->connect_beacon = false;
     link->connect_address = address;
     link->connect_code = code;
     link->state = NetShareLinkState::connecting;
     link->refusal = NetClientRefusal::none;
+    return true;
+}
+
+// With the lock held: closes what runs, then a connect through `beacon`
+// once its addresses are looked up (the thread does both).
+static void connect_through_beacon(NetShareLink* link, const std::string* beacon)
+{
+    if (link->client.state != NetClientState::idle)
+    {
+        if (!link->closing)
+        {
+            net_client_close(&link->client);
+            link->closing = true;
+        }
+        net_share_client_disconnected(&link->share);
+    }
+    link->connect_pending = true;
+    link->connect_beacon = true;
+    link->connect_beacon_name = *beacon;
+    link->resolve_wanted = true;
+    link->resolved = false;
+    link->server_count = 0;
+    link->state = NetShareLinkState::connecting;
+    link->refusal = NetClientRefusal::none;
+}
+
+void net_share_link_set_beacon(NetShareLink* link, const char* server)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    link->beacon = server != nullptr ? server : "";
+}
+
+bool net_share_link_connect_paired(NetShareLink* link, uint32_t device)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    if (!link->running || link->beacon.empty() || device >= link->client.trust.devices.size())
+    {
+        return false;
+    }
+    link->connect_device = static_cast<int32_t>(device);
+    link->connect_code.clear();
+    connect_through_beacon(link, &link->beacon);
+    return true;
+}
+
+bool net_share_link_pair_link(NetShareLink* link, const char* pair_link, const char* code)
+{
+    uint8_t key[NET_KEY_SIZE] = {};
+    std::string link_beacon;
+    if (!net_pair_link_parse(pair_link, key, &link_beacon))
+    {
+        return false;
+    }
+    std::lock_guard<std::mutex> guard(link->lock);
+    std::string beacon = link_beacon.empty() ? link->beacon : link_beacon;
+    if (!link->running || beacon.empty())
+    {
+        return false;
+    }
+    link->connect_device = -1;
+    std::memcpy(link->connect_key, key, NET_KEY_SIZE);
+    link->connect_code = code != nullptr ? code : "";
+    connect_through_beacon(link, &beacon);
     return true;
 }
 
@@ -290,6 +400,11 @@ void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status)
     for (uint32_t i = 0; i < link->found_count; i++)
     {
         status->found.push_back(link->found[i]);
+    }
+    status->paired.clear();
+    for (size_t i = 0; i < link->client.trust.devices.size(); i++)
+    {
+        status->paired.push_back(link->client.trust.devices[i].name);
     }
 }
 
