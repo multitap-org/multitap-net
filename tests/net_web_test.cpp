@@ -321,7 +321,9 @@ static int run_fixed_host(const char* url, const char* dir)
     return g_failures == 0 ? 0 : 1;
 }
 
-static void run_fixed_client(const char* url)
+// `wait_close`: after ready, stay until the connection is reported closed
+// (the host killed by hand: how long it takes to notice).
+static void run_fixed_client(const char* url, bool wait_close)
 {
     NetKeypair host_key;
     NetKeypair client_key;
@@ -351,6 +353,23 @@ static void run_fixed_client(const char* url)
         sleep_ms(5);
     }
     check(ready, "browser ready with the native host (libdatachannel <-> browser)");
+    if (ready && wait_close)
+    {
+        std::printf("ready: now kill the host (60 s at most)\n");
+        double start = net_seconds();
+        bool closed = false;
+        for (int i = 0; i < 12000 && !closed; i++)
+        {
+            NetClientEvent event;
+            while (net_client_poll(client, &event))
+            {
+                closed = closed || event.type == NetClientEventType::closed;
+            }
+            sleep_ms(5);
+        }
+        std::printf("closed after %.1f s\n", net_seconds() - start);
+        check(closed, "a host that vanished is noticed");
+    }
     net_client_destroy(client);
     delete client;
 }
@@ -367,9 +386,9 @@ int main(int argc, char** argv)
         std::printf(status == 0 ? "net web host: all checks passed\n" : "net web host: failed\n");
         return status;
     }
-    if (std::strcmp(mode, "client") == 0)
+    if (std::strcmp(mode, "client") == 0 || std::strcmp(mode, "client-wait") == 0)
     {
-        run_fixed_client(url);
+        run_fixed_client(url, std::strcmp(mode, "client-wait") == 0);
     }
     else
     {
