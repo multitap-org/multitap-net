@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- frontend_net_web_test (tests/net_web_test.cpp): open as
+     net_web_test.html?beacon=ws://127.0.0.1:<port>/signal (&mode=client to
+     meet frontend_net_web_host, a native host) from a server that
+     sends the COOP/COEP headers (tests/web/serve.py). -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>RUNNING</title>
+<style>body { font: 13px monospace; white-space: pre-wrap; }</style>
+</head>
+<body>
+<script>
+var params = new URLSearchParams(location.search);
+var Module = {
+  arguments: [params.get('beacon') || '', params.get('mode') || ''],
+  print: function(text) { document.body.textContent += text + '\n'; console.log(text); },
+  onExit: function(status) { document.title = status === 0 ? 'PASS' : 'FAIL'; },
+  printErr: function(text) { document.body.textContent += text + '\n'; console.warn(text); },
+};
+</script>
+<script src="frontend_net_web_test.js"></script>
+</body>
+</html>

@@ -10,7 +10,7 @@
 // One implementation per platform, chosen by CMake (never both in one build):
 //   net_rtc_datachannel.cpp  libdatachannel (desktop, Android)
 //   net_rtc_none.cpp         no WebRTC: every call fails, nothing is reported
-//   (Emscripten: the browser's RTCPeerConnection, through net_webrtc.js; later)
+//   net_rtc_emscripten.cpp   the browser's RTCPeerConnection, through net_webrtc.js
 //
 // Signaling is the caller's: connecting gives "signal" blobs (our own SDP and
 // ICE candidates) to deliver to the other side however it can (the beacon's
@@ -51,6 +51,9 @@ struct NetRtcEvent
 
 // Whether this build has WebRTC at all.
 bool net_rtc_available();
+// Whether WebRTC is the only transport (the browser: no UDP sockets, so
+// NetHost opens no ENet host at all and every peer is a WebRTC one).
+bool net_rtc_only();
 
 // `stun` = "stun:host:port" or nullptr (host candidates only: same LAN).
 NetRtc* net_rtc_create(const char* stun);

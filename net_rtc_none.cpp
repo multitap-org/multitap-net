@@ -3,6 +3,11 @@
 
 #include "net_rtc.h"
 
+bool net_rtc_only()
+{
+    return false;
+}
+
 bool net_rtc_available()
 {
     return false;
