@@ -27,7 +27,7 @@ var LibraryNetWebRtc = {
 
     LABELS: ['control', 'input', 'stream', 'files'],
     CHANNELS: 4,
-    MAX_PEERS: 8,
+    LOST_SECONDS: 10,   // 'disconnected' this long = gone
 
     // Ring offsets (bytes) and record header.
     HEAD: 0, TAIL: 4, SIZE: 8, DROPPED: 12, RELEASED: 16, DATA: 32,
@@ -156,6 +156,7 @@ var LibraryNetWebRtc = {
       if (!peer) return;
       instance.peers[index] = null;
       peer.closed = true;
+      if (peer.lost) clearTimeout(peer.lost);
       peer.pc.onicecandidate = null;
       peer.pc.onconnectionstatechange = null;
       peer.channels.forEach(function(channel) {
@@ -182,7 +183,7 @@ var LibraryNetWebRtc = {
         return;
       }
       var peer = {pc: pc, channels: [], open: 0, connected: false, closed: false, offers: offers,
-                  chain: Promise.resolve()};
+                  chain: Promise.resolve(), lost: 0};
       instance.peers[index] = peer;
       var fail = function(error) {
         if (peer.closed) return;
@@ -229,8 +230,24 @@ var LibraryNetWebRtc = {
         NetWebRtc.emit(id, instance, NetWebRtc.EV_SIGNAL, 0, index,
                        NetWebRtc.blob('c', event.candidate.sdpMid || '', event.candidate.candidate), false);
       };
+      // A side that vanished without closing (its tab or app killed, its
+      // network gone) shows as 'disconnected' a few seconds later (ICE's
+      // consent checks stop getting answers); browsers may take much longer
+      // to call it 'failed'. Back to 'connected' within LOST_SECONDS is a
+      // network hiccup; otherwise the connection is over.
       pc.onconnectionstatechange = function() {
-        if (pc.connectionState === 'failed' || pc.connectionState === 'closed') fail(pc.connectionState);
+        var state = pc.connectionState;
+        if (state === 'failed' || state === 'closed') {
+          fail(state);
+        } else if (state === 'disconnected') {
+          if (!peer.lost) {
+            peer.lost = setTimeout(function() { fail('lost (no answer for ' + NetWebRtc.LOST_SECONDS + ' s)'); },
+                                   NetWebRtc.LOST_SECONDS * 1000);
+          }
+        } else if (peer.lost) {
+          clearTimeout(peer.lost);
+          peer.lost = 0;
+        }
       };
       if (offers) {
         peer.chain = peer.chain.then(function() {
