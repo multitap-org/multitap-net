@@ -7,7 +7,7 @@
 // (net_client_pair_beacon). Knowing a host's key gives nothing else: the
 // pairing room exists only while the host shows its code.
 //
-//   https://get-piccolo.app/pair#k=<host key, base32>[&b=<beacon>]
+//   https://get-piccolo.app/pair/#k=<host key, base32>[&b=<beacon>]
 //
 // Base32: RFC 4648 alphabet, lowercase, no padding (52 characters).
 
@@ -16,7 +16,7 @@
 
 #include "net_noise.h"
 
-constexpr const char* NET_PAIR_LINK_BASE = "https://get-piccolo.app/pair#";
+constexpr const char* NET_PAIR_LINK_BASE = "https://get-piccolo.app/pair/#";
 
 // `beacon`: the host's beacon setting; nullptr, "" or the default leaves it out.
 std::string net_pair_link(const uint8_t* host_key, const char* beacon);
