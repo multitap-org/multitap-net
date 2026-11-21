@@ -56,6 +56,7 @@ bool net_client_connect(NetClient* client, NetAddress address, const char* code)
     }
     client->state = NetClientState::connecting;
     client->via_beacon = false;
+    client->expect_key = false;
     return true;
 }
 
@@ -71,9 +72,16 @@ void net_client_set_signal(NetClient* client, const char* url, const char* stun)
 static bool start_signal(NetClient* client)
 {
     if (client->signal_url.empty() || client->via_signal ||
-        !net_session_enable_rtc(&client->session, client->signal_stun.empty() ? nullptr : client->signal_stun.c_str()) ||
-        !net_signal_client_start(&client->signal, client->signal_url.c_str(), &client->session.identity,
-                                 client->trust.devices[client->beacon_device].key, net_seconds()))
+        !net_session_enable_rtc(&client->session, client->signal_stun.empty() ? nullptr : client->signal_stun.c_str()))
+    {
+        return false;
+    }
+    bool started = client->meet_pairing
+                       ? net_signal_client_start_pair(&client->signal, client->signal_url.c_str(), client->meet_key,
+                                                      net_seconds())
+                       : net_signal_client_start(&client->signal, client->signal_url.c_str(),
+                                                 &client->session.identity, client->meet_key, net_seconds());
+    if (!started)
     {
         return false;
     }
@@ -84,6 +92,20 @@ static bool start_signal(NetClient* client)
     return true;
 }
 
+// UDP first (MEET `id` at the beacon), else WebRTC through its signaling.
+static bool start_meeting(NetClient* client, const NetAddress* servers, uint32_t count, const BeaconId* id)
+{
+    client->via_signal = false;
+    client->peer = NET_NO_PEER;
+    client->via_beacon = true;   // the beacon either way: UDP or its signaling
+    if (count > 0 && net_beacon_client_start(&client->beacon, servers, count, id, net_seconds()))
+    {
+        client->state = NetClientState::meeting;
+        return true;
+    }
+    return start_signal(client);
+}
+
 bool net_client_connect_beacon(NetClient* client, const NetAddress* servers, uint32_t count, uint32_t device)
 {
     if (client->state != NetClientState::idle || device >= client->trust.devices.size())
@@ -91,19 +113,38 @@ bool net_client_connect_beacon(NetClient* client, const NetAddress* servers, uin
         return false;
     }
     forget_secrets(client);
-    client->beacon_device = device;
-    client->via_signal = false;
-    client->peer = NET_NO_PEER;
+    std::memcpy(client->meet_key, client->trust.devices[device].key, NET_KEY_SIZE);
+    client->meet_pairing = false;
+    client->expect_key = false;   // the welcome checks it against our list
     BeaconId id;
-    if (count > 0 && net_beacon_meeting_id(&client->session.identity, client->trust.devices[device].key, &id) &&
-        net_beacon_client_start(&client->beacon, servers, count, &id, net_seconds()))
+    if (!net_beacon_meeting_id(&client->session.identity, client->meet_key, &id))
     {
-        client->via_beacon = true;
-        client->state = NetClientState::meeting;
-        return true;
+        return false;
     }
-    client->via_beacon = true;   // the beacon all the same: its signaling
-    return start_signal(client);
+    return start_meeting(client, servers, count, &id);
+}
+
+bool net_client_pair_beacon(NetClient* client, const NetAddress* servers, uint32_t count, const uint8_t* host_key,
+                            const char* code)
+{
+    if (client->state != NetClientState::idle || code == nullptr || !net_pair_code_valid(code))
+    {
+        return false;
+    }
+    forget_secrets(client);
+    std::memcpy(client->code, code, NET_PAIR_CODE_DIGITS + 1);
+    client->has_code = true;
+    std::memcpy(client->meet_key, host_key, NET_KEY_SIZE);
+    client->meet_pairing = true;
+    client->expect_key = true;
+    BeaconId id;
+    net_beacon_pair_id(host_key, &id);
+    if (!start_meeting(client, servers, count, &id))
+    {
+        forget_secrets(client);
+        return false;
+    }
+    return true;
 }
 
 // The signaling side of a meeting: the client's WebRTC peer once it offered,
@@ -419,6 +460,12 @@ bool net_client_poll(NetClient* client, NetClientEvent* event)
         case NetSessionEventType::signal:
             break;
         case NetSessionEventType::secured:
+            if (client->expect_key && crypto_verify32(session_event.remote_key, client->meet_key) != 0)
+            {
+                // Someone else in the host's pairing room: not who the link names.
+                refuse(client, NetClientRefusal::unknown_host, true, event);
+                return true;
+            }
             std::memcpy(client->host_key, session_event.remote_key, NET_KEY_SIZE);
             std::memcpy(client->handshake_hash, session_event.handshake_hash, NET_HASH_SIZE);
             client->state = NetClientState::waiting;

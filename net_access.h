@@ -137,3 +137,9 @@ NetBeaconStatus net_access_beacon_status(const NetAccess* access);
 // STUN (net_signal_stun); "" turns it off. False if this build has no WebRTC.
 bool net_access_set_signal(NetAccess* access, const char* url, const char* stun);
 NetSignalStatus net_access_signal_status(const NetAccess* access);
+// The two together, for a status line: can paired devices reach us from
+// outside? `registered` when the UDP registration holds or the signaling
+// socket is in its rooms (a browser has only the latter); `symmetric_nat`
+// when UDP found one (WebRTC may not get through it either); otherwise
+// whichever says more (waiting, unreachable).
+NetBeaconStatus net_access_internet_status(const NetAccess* access);

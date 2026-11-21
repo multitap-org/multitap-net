@@ -95,7 +95,9 @@ struct NetClient
     std::string    signal_url;           // "" = no signaling (net_client_set_signal)
     std::string    signal_stun;
     bool           via_signal = false;   // this connection is WebRTC, signaled by the beacon
-    uint32_t       beacon_device = 0;    // the host being met (its index in our list)
+    uint8_t        meet_key[NET_KEY_SIZE] = {};   // the host being met through the beacon
+    bool           meet_pairing = false; // met in its pairing room (net_client_pair_beacon)
+    bool           expect_key = false;   // the host must turn out to have meet_key
 };
 
 bool net_client_create(NetClient* client, const NetKeypair* identity, const char* name, const char* trust_path);
@@ -111,6 +113,14 @@ bool net_client_connect(NetClient* client, NetAddress address, const char* code)
 // if that fails (or `count` is 0, as in a browser) and signaling is set,
 // WebRTC through the beacon's signaling. The refusals are the same either way.
 bool net_client_connect_beacon(NetClient* client, const NetAddress* servers, uint32_t count, uint32_t device);
+// Pairs across the internet with a host known only by its key (the pair
+// link or QR: net_pair_link_parse) and the 6-digit `code` it shows: the same
+// flow as net_client_connect_beacon (UDP, then WebRTC), met in the host's
+// pairing room, which is there only while the host has pairing open (else
+// host_offline). The host has to have that key (else unknown_host): the link
+// says who we pair with, the code proves it, as on the LAN.
+bool net_client_pair_beacon(NetClient* client, const NetAddress* servers, uint32_t count, const uint8_t* host_key,
+                            const char* code);
 // The beacon's signaling (net_signal_url / net_signal_stun); "" = none.
 void net_client_set_signal(NetClient* client, const char* url, const char* stun);
 bool net_client_poll(NetClient* client, NetClientEvent* event);

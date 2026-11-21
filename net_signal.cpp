@@ -85,10 +85,29 @@ void net_signal_host_start(NetSignal* signal, const char* url)
     signal->failed_once = false;
 }
 
+static void keep_peer(const NetSignal* signal, NetSignalRoom* room)
+{
+    for (size_t j = 0; j < signal->rooms.size(); j++)
+    {
+        if (beacon_id_equal(&signal->rooms[j].room, &room->room))
+        {
+            room->peer = signal->rooms[j].peer;   // a room that stays keeps its connection
+        }
+    }
+}
+
 void net_signal_host_set_rooms(NetSignal* signal, const NetKeypair* own, const uint8_t (*device_keys)[NET_KEY_SIZE],
-                               uint32_t count)
+                               uint32_t count, bool pairing)
 {
     std::vector<NetSignalRoom> rooms;
+    if (pairing)
+    {
+        NetSignalRoom room;
+        net_beacon_pair_id(own->public_key, &room.room);
+        net_beacon_pair_signal_key(own->public_key, room.key);
+        keep_peer(signal, &room);
+        rooms.push_back(room);
+    }
     for (uint32_t i = 0; i < count && rooms.size() < NET_SIGNAL_MAX_ROOMS; i++)
     {
         NetSignalRoom room;
@@ -97,13 +116,7 @@ void net_signal_host_set_rooms(NetSignal* signal, const NetKeypair* own, const u
         {
             continue;
         }
-        for (size_t j = 0; j < signal->rooms.size(); j++)
-        {
-            if (beacon_id_equal(&signal->rooms[j].room, &room.room))
-            {
-                room.peer = signal->rooms[j].peer;   // a pairing that stays keeps its connection
-            }
-        }
+        keep_peer(signal, &room);
         rooms.push_back(room);
     }
     for (size_t j = 0; j < signal->rooms.size(); j++)
@@ -123,6 +136,21 @@ bool net_signal_client_start(NetSignal* signal, const char* url, const NetKeypai
     {
         return false;
     }
+    signal->role = NetSignalRole::client;
+    signal->url = url;
+    signal->rooms.push_back(room);
+    signal->socket = net_rtc_socket_open(url);
+    signal->started = now;
+    signal->failure = NetSignalFailure::none;
+    return signal->socket != nullptr;
+}
+
+bool net_signal_client_start_pair(NetSignal* signal, const char* url, const uint8_t* host_key, double now)
+{
+    net_signal_stop(signal);
+    NetSignalRoom room;
+    net_beacon_pair_id(host_key, &room.room);
+    net_beacon_pair_signal_key(host_key, room.key);
     signal->role = NetSignalRole::client;
     signal->url = url;
     signal->rooms.push_back(room);

@@ -87,15 +87,20 @@ struct NetSignal
 };
 
 // The host: `url` "" stops. The rooms: one per paired device, from our key
-// and theirs (call again when the list changes; rooms that stay keep their peer).
+// and theirs, plus the pairing room while pairing is open (`pairing`; the
+// room comes from our public key, net_beacon_pair_id). Call again when the
+// list changes or pairing opens / closes; rooms that stay keep their peer.
 void net_signal_host_start(NetSignal* signal, const char* url);
 void net_signal_host_set_rooms(NetSignal* signal, const NetKeypair* own, const uint8_t (*device_keys)[NET_KEY_SIZE],
-                               uint32_t count);
+                               uint32_t count, bool pairing);
 
 // The client: meets the host whose key is `host_key`. False if the keys
 // can't be used or there's no WebRTC in this build.
 bool net_signal_client_start(NetSignal* signal, const char* url, const NetKeypair* own, const uint8_t* host_key,
                              double now);
+// The client that pairs: meets the host whose key is `host_key` in its
+// pairing room (open only while the host shows its code).
+bool net_signal_client_start_pair(NetSignal* signal, const char* url, const uint8_t* host_key, double now);
 
 void net_signal_stop(NetSignal* signal);
 

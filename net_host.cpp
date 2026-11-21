@@ -235,6 +235,10 @@ static const NetHostSlot* slot_get(const NetHost* host, uint32_t peer)
 static bool host_create(NetHost* host, const ENetAddress* bind_address)
 {
     slots_reset(host);
+    if (net_rtc_only())
+    {
+        return true;   // the browser: no UDP, WebRTC peers only (no discovery, no ENet)
+    }
     host->enet = enet_host_create(bind_address, NET_MAX_PEERS, NET_CHANNEL_COUNT, 0, 0);
     if (host->enet == nullptr)
     {
@@ -257,6 +261,11 @@ bool net_host_create_listener(NetHost* host, uint16_t port, const char* name)
     }
     host->listener = true;
     name_copy(&host->name, name);
+    if (host->enet == nullptr)
+    {
+        host_log(LogLevel::info, "Network: listening through WebRTC only as \"%s\"", host->name.c_str());
+        return true;
+    }
     host_log(LogLevel::info, "Network: listening on UDP port %u as \"%s\"", static_cast<unsigned>(net_host_port(host)),
              host->name.c_str());
     return true;

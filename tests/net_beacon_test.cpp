@@ -20,6 +20,7 @@
 #include "net_access.h"
 #include "net_beacon.h"
 #include "net_client.h"
+#include "net_pair_link.h"
 
 static int g_failures = 0;
 
@@ -40,6 +41,8 @@ struct World
     NetClient*   client = nullptr;
     NetAddress   beacon_address;
     bool         host_authorized = false;
+    bool         host_paired = false;
+    bool         newly_paired = false;
     bool         client_ready = false;
     bool         client_refused = false;
     NetClientRefusal refusal = NetClientRefusal::none;
@@ -58,6 +61,10 @@ static void pump(World* world)
         {
             world->host_authorized = true;
         }
+        if (host_event.type == NetAccessEventType::paired)
+        {
+            world->host_paired = true;
+        }
     }
     if (world->client != nullptr)
     {
@@ -67,6 +74,7 @@ static void pump(World* world)
             if (client_event.type == NetClientEventType::ready)
             {
                 world->client_ready = true;
+                world->newly_paired = client_event.newly_paired;
             }
             else if (client_event.type == NetClientEventType::refused)
             {
@@ -219,6 +227,47 @@ static void test_end_to_end(const std::string& dir)
     check(net_client_connect_beacon(world.client, &nowhere, 1, 0), "meeting through a missing beacon");
     check(pump_until(&world, &world.client_refused, 8000), "refused");
     check(world.refusal == NetClientRefusal::beacon_unreachable, "as beacon_unreachable");
+    net_client_destroy(world.client);
+    delete world.client;
+    world.client = nullptr;
+
+    // Pairing across the internet: a new device with only the pair link
+    // (the host's key) and the code, met in the host's pairing room.
+    std::string link = net_pair_link(host_key.public_key, nullptr);
+    uint8_t link_key[NET_KEY_SIZE];
+    std::string link_beacon;
+    check(net_pair_link_parse(link.c_str(), link_key, &link_beacon) &&
+              std::memcmp(link_key, host_key.public_key, NET_KEY_SIZE) == 0 && link_beacon.empty(),
+          "pair link round trip");
+    NetKeypair tablet_key;
+    net_keypair_generate(&tablet_key);
+    std::string tablet_trust = dir + "/tablet_hosts.cfg";
+    NetTrust empty;
+    net_trust_save(&empty, tablet_trust.c_str());
+    world.client = new NetClient();
+    world.client_refused = false;
+    world.client_ready = false;
+    net_client_create(world.client, &tablet_key, "TABLET", tablet_trust.c_str());
+    check(net_client_pair_beacon(world.client, &world.beacon_address, 1, link_key, "123456"),
+          "pairing while the host isn't pairing");
+    check(pump_until(&world, &world.client_refused, 8000) && world.refusal == NetClientRefusal::host_offline,
+          "no pairing room: host_offline");
+    check(net_access_open_pairing(world.host), "host opens pairing");
+    for (int i = 0; i < 100; i++)   // its REGISTER with the pairing room
+    {
+        pump(&world);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    world.client_refused = false;
+    check(net_client_pair_beacon(world.client, &world.beacon_address, 1, link_key, world.host->code),
+          "pairing through the beacon");
+    check(pump_until(&world, &world.client_ready, 8000), "client paired and ready");
+    check(world.newly_paired, "as newly paired");
+    check(pump_until(&world, &world.host_paired, 2000), "host saw the new device");
+    check(world.client->trust.devices.size() == 1 &&
+              std::memcmp(world.client->trust.devices[0].key, host_key.public_key, NET_KEY_SIZE) == 0,
+          "the client keeps the host's key");
+    check(!world.host->pairing_open, "pairing closed after it");
     net_client_destroy(world.client);
     delete world.client;
     world.client = nullptr;

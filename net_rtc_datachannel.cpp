@@ -154,6 +154,11 @@ static void RTC_API on_log(rtcLogLevel level, const char* message)
     host_log(level <= RTC_LOG_ERROR ? LogLevel::error : LogLevel::warning, "WebRTC: %s", message);
 }
 
+bool net_rtc_only()
+{
+    return false;
+}
+
 bool net_rtc_available()
 {
     return true;

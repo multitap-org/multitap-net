@@ -61,6 +61,16 @@ bool net_beacon_meeting_id(const NetKeypair* own, const uint8_t* other_public_ke
 // BLAKE2b("multitap signal v1" || X25519(own, other)); net_signal.h).
 bool net_beacon_signal_key(const NetKeypair* own, const uint8_t* other_public_key, uint8_t* key);
 
+// The pairing room: where a device that only has the host's key (the pair
+// link or QR, net_pairing.h) meets the host while its pairing is open.
+// BLAKE2b("multitap pair v1" || host key). Anyone with the link can compute
+// it: the 6-digit code (CPace) is what proves the pairing, as on the LAN.
+void net_beacon_pair_id(const uint8_t* host_key, BeaconId* id);
+// The key that seals the pairing room's signaling blobs (32 bytes:
+// BLAKE2b("multitap pair signal v1" || host key)). It keeps the WebRTC offer
+// (and so the IPs) from the beacon, not from whoever has the link.
+void net_beacon_pair_signal_key(const uint8_t* host_key, uint8_t* key);
+
 // One server address (a family) as we talk to it.
 struct NetBeaconServer
 {
