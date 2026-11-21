@@ -15,7 +15,10 @@
 #include <string>
 #include <thread>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <spawn.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -97,6 +100,52 @@ static bool pump_until_failure(Side* host, Side* client, int milliseconds)
     return client->signal.failure != NetSignalFailure::none;
 }
 
+// The beacon listens: its signaling port takes a TCP connection (it opens
+// that port after its UDP ones). A fixed wait was too short under ASan with
+// other tests running, and a refused socket retries only after 5 s.
+static bool wait_for_listener(uint16_t port, int milliseconds)
+{
+    for (int i = 0; i < milliseconds / 20; i++)
+    {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0)
+        {
+            return false;
+        }
+        sockaddr_in address = {};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(port);
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        bool connected = connect(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0;
+        close(fd);
+        if (connected)
+        {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
+
+// Polls the host until the beacon has answered the JOIN of each of its
+// rooms (a client sent before that is told the host is offline).
+static bool access_rooms_joined(NetAccess* access, int milliseconds)
+{
+    for (int i = 0; i < milliseconds / 5; i++)
+    {
+        NetAccessEvent ignored;
+        while (net_access_poll(access, &ignored))
+        {
+        }
+        if (net_signal_rooms_joined(&access->signal))
+        {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 3)
@@ -124,7 +173,7 @@ int main(int argc, char** argv)
         std::printf("FAIL could not start %s\n", argv[1]);
         return 1;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    check(wait_for_listener(signal_port, 10000), "beacon listening");
     std::string url = "ws://127.0.0.1:" + signal_text + "/signal";
 
     net_init();
@@ -145,15 +194,14 @@ int main(int argc, char** argv)
     std::memcpy(devices[0], client_key.public_key, NET_KEY_SIZE);
     net_signal_host_set_rooms(&host->signal, &host_key, devices, 1, false);
     bool host_ready = false;
-    for (int i = 0; i < 400 && !host_ready; i++)
+    for (int i = 0; i < 2000 && !host_ready; i++)
     {
         pump_side(host, net_seconds());
-        host_ready = net_signal_status(&host->signal, net_seconds()) == NetSignalStatus::ready;
+        host_ready = net_signal_rooms_joined(&host->signal);
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     check(host_ready, "host's signaling socket open, room joined");
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));   // its JOIN reaches the beacon
-    pump_side(host, net_seconds());
+    check(net_signal_status(&host->signal, net_seconds()) == NetSignalStatus::ready, "host's signaling ready");
 
     check(net_signal_client_start(&client->signal, url.c_str(), &client_key, host_key.public_key, net_seconds()),
           "client meets its host's room");
@@ -206,18 +254,8 @@ int main(int argc, char** argv)
     check(net_access_set_signal(access, url.c_str(), nullptr), "access signals");
     check(net_client_create(phone, &client_key, "PHONE", client_hosts.c_str()), "client created");
     net_client_set_signal(phone, url.c_str(), nullptr);
-    bool access_ready = false;
-    for (int i = 0; i < 400 && !access_ready; i++)
-    {
-        NetAccessEvent ignored;
-        while (net_access_poll(access, &ignored))
-        {
-        }
-        access_ready = net_access_signal_status(access) == NetSignalStatus::ready;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    check(access_ready, "access in its rooms");
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    check(access_rooms_joined(access, 10000), "access in its rooms");
+    check(net_access_signal_status(access) == NetSignalStatus::ready, "access signaling ready");
     check(net_client_connect_beacon(phone, nullptr, 0, 0), "client meets through signaling only");
     bool phone_ready = false;
     bool access_authorized = false;
@@ -294,14 +332,7 @@ int main(int argc, char** argv)
     check(net_client_create(tablet, &tablet_key, "TABLET", tablet_hosts.c_str()), "tablet created");
     net_client_set_signal(tablet, url.c_str(), nullptr);
     check(net_access_open_pairing(access), "host opens pairing");
-    for (int i = 0; i < 40; i++)   // the pairing room's JOIN reaches the beacon
-    {
-        NetAccessEvent ignored;
-        while (net_access_poll(access, &ignored))
-        {
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    check(access_rooms_joined(access, 10000), "the pairing room joined");
     check(net_client_pair_beacon(tablet, nullptr, 0, host_key.public_key, access->code), "tablet pairs by signaling");
     bool tablet_ready = false;
     bool tablet_new = false;
