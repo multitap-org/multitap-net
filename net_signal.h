@@ -46,6 +46,7 @@ struct NetSignalRoom
     BeaconId room;
     uint8_t  key[NET_SIGNAL_KEY_SIZE] = {};
     uint32_t peer = NET_NO_PEER;   // the WebRTC peer this room's signals belong to
+    bool     joined = false;       // the beacon answered our JOIN (JOINED) on the socket open now
 };
 
 enum class NetSignalRole
@@ -58,7 +59,7 @@ enum class NetSignalStatus
 {
     off,
     connecting,    // the socket isn't open yet (or is being opened again)
-    ready,         // open, rooms joined
+    ready,         // open (its rooms may still be joining: net_signal_rooms_joined)
     unreachable,   // the socket failed or the beacon didn't answer
 };
 
@@ -114,5 +115,9 @@ void net_signal_outgoing(NetSignal* signal, uint32_t peer, const uint8_t* blob, 
 void net_signal_peer_gone(NetSignal* signal, uint32_t peer);
 
 NetSignalStatus net_signal_status(const NetSignal* signal, double now);
+// Open, and the beacon has answered the JOIN of every room (a room added
+// a moment ago may not be there yet: a client arriving before it would be
+// told its host is offline).
+bool net_signal_rooms_joined(const NetSignal* signal);
 // The client's WebRTC peer, once it offered (NET_NO_PEER before).
 uint32_t net_signal_client_peer(const NetSignal* signal);

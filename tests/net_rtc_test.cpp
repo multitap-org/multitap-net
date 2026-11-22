@@ -137,8 +137,22 @@ int main()
     check(loop->got[2], "stream message arrived");
     check(loop->got[3], "files message arrived");
 
+    // NetHost's pings give WebRTC peers a round trip (ENet's own on UDP).
+    for (int i = 0; i < 300 && loop->client.host.slots[loop->client_peer].pongs == 0; i++)
+    {
+        pump(loop);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    NetLinkStats stats;
+    check(net_host_peer_stats(&loop->client.host, loop->client_peer, &stats), "stats of a WebRTC peer");
+    check(loop->client.host.slots[loop->client_peer].pongs > 0, "a pong came back (round trip known)");
+    check(stats.round_trip_ms < 1000 && stats.loss == 0.0f, "a sane round trip, no loss on loopback");
+
+    // A clean close is seen at once through NetHost's bye (libdatachannel's
+    // own teardown reaches a browser only after its ~15 s timeouts).
     net_session_close(&loop->client, loop->client_peer);
-    check(pump_until(loop, &loop->host_closed, 10000), "host saw the client leave");
+    check(pump_until(loop, &loop->host_closed, 1000), "host saw the client leave within a second");
+    check(loop->host.host.rtc_byes_received >= 1, "... through the client's bye (sent twice: one or both)");
 
     net_session_destroy(&loop->client);
     net_session_destroy(&loop->host);

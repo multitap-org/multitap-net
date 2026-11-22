@@ -51,6 +51,7 @@ struct NetShareLinkStatus
     std::string       code;        // while pairing: the code to show (the host's user types it), else ""
     bool              waiting_host = false;   // pairing: the host has our request, its user hasn't typed yet
     std::vector<NetShareLinkFound> found;   // piccolos on the LAN, newest first
+    std::vector<std::string> paired;        // the piccolos we paired with (net_share_link_connect_paired's index)
 };
 
 struct NetShareLink
@@ -73,6 +74,18 @@ struct NetShareLink
     bool        connect_pending = false;
     NetAddress  connect_address;
     std::string connect_code;
+    // Across the internet (through the beacon): the pending connect is to
+    // paired host `connect_device`, or pairs (`connect_device` -1) with our
+    // `connect_code` in its pairing room (the other side's INVITE).
+    bool        connect_beacon = false;
+    int32_t     connect_device = -1;
+    std::string connect_beacon_name;    // the beacon used for it ("name" or "name:port")
+    // Its addresses, looked up by the thread outside the lock (DNS blocks).
+    bool        resolve_wanted = false;
+    bool        resolved = false;
+    NetAddress  servers[NET_BEACON_MAX_SERVERS];
+    uint32_t    server_count = 0;
+    std::string beacon;                 // the frontend's beacon setting (net_share_link_set_beacon)
 
     NetShareLinkState state = NetShareLinkState::off;
     NetClientRefusal  refusal = NetClientRefusal::none;
@@ -91,9 +104,20 @@ bool net_share_link_started(const NetShareLink* link);
 void net_share_link_set_folders(NetShareLink* link, const std::vector<std::string>* game_paths,
                                 const char* saves_path, const char* states_path);
 
-// To a piccolo found on the LAN (or any address): `code` = the 6 digits it
-// shows to pair, "" when we're paired already. Closes a connection first.
+// To a piccolo found on the LAN (or any address): `code` = ours (9 digits,
+// shown here for the other side to type) if it doesn't know us yet; a
+// piccolo that knows us never asks for it. Closes a connection first.
 bool net_share_link_connect(NetShareLink* link, NetAddress address, const char* code);
+// Across the internet, through the beacon (UDP hole punching, then WebRTC
+// through its signaling; net_client_connect_beacon): `server` is the
+// frontend's beacon setting ("" = none: the calls below fail).
+void net_share_link_set_beacon(NetShareLink* link, const char* server);
+// To a piccolo we paired with (the index into the status' `paired`).
+bool net_share_link_connect_paired(NetShareLink* link, uint32_t device);
+// Pairs across the internet with `code`, ours (net_pair_code_generate, shown
+// on our screen): the other piccolo's user types it in INVITE, which waits in
+// the code's pairing room on the beacon. False if the code isn't 9 digits.
+bool net_share_link_pair_beacon(NetShareLink* link, const char* code);
 void net_share_link_disconnect(NetShareLink* link);
 
 void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status);

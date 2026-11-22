@@ -62,6 +62,10 @@ static void close_socket(NetSignal* signal)
     signal->socket = nullptr;
     signal->open = false;
     signal->joined = false;
+    for (size_t i = 0; i < signal->rooms.size(); i++)
+    {
+        signal->rooms[i].joined = false;   // a new socket joins them again
+    }
 }
 
 void net_signal_stop(NetSignal* signal)
@@ -93,6 +97,7 @@ static void keep_peer(const NetSignal* signal, NetSignalRoom* room)
         if (beacon_id_equal(&signal->rooms[j].room, &room->room))
         {
             room->peer = signal->rooms[j].peer;   // a room that stays keeps its connection
+            room->joined = signal->rooms[j].joined;   // ... and stays joined
         }
     }
 }
@@ -288,6 +293,7 @@ static void on_message(NetSignal* signal, NetSession* session, const uint8_t* da
     switch (message.type)
     {
     case BeaconSignalingType::JOINED:
+        room->joined = true;
         if (client)
         {
             signal->joined = true;
@@ -409,6 +415,22 @@ NetSignalStatus net_signal_status(const NetSignal* signal, double now)
         return NetSignalStatus::ready;
     }
     return signal->failed_once ? NetSignalStatus::unreachable : NetSignalStatus::connecting;
+}
+
+bool net_signal_rooms_joined(const NetSignal* signal)
+{
+    if (signal->url.empty() || !signal->open)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < signal->rooms.size(); i++)
+    {
+        if (!signal->rooms[i].joined)
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 uint32_t net_signal_client_peer(const NetSignal* signal)
