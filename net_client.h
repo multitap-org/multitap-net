@@ -91,6 +91,7 @@ struct NetClient
     std::vector<uint8_t> online_pending;   // this round's answers, OR'ed over the servers
     uint64_t       presence_base = 0;     // the round's first nonce (one per 8 hosts)
     bool           presence_answered = false;   // a beacon answered once (an old one never does: unknown)
+    bool           welcome_pending = false;   // paired (pair_result ok): `ready` waits for the welcome with our level
     char           code[NET_PAIR_CODE_DIGITS + 1] = {};
     uint8_t        host_key[NET_KEY_SIZE] = {};
     uint8_t        handshake_hash[NET_HASH_SIZE] = {};
