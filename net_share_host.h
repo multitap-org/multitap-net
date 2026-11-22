@@ -1,7 +1,7 @@
 #pragma once
 
 // The host's side of piccolo-share (net_share.h), on the network thread
-// (net_service): answers OWNER devices' listings, gets and puts from its
+// (net_service): answers SHARE devices' listings, gets and puts from its
 // shared folders (net_share_folders.h) and runs the copy with one
 // NetShareEngine. One copy at a time; a device asking while another copy
 // runs gets `busy` and asks again.
@@ -41,7 +41,7 @@ void net_share_host_set_folders(NetShareHost* share, const std::vector<std::stri
 
 // A message from an authorized peer: true if it was piccolo-share's (handled
 // here, not for the frontend). NetAccess already dropped what a device below
-// OWNER sent.
+// SHARE sent.
 bool net_share_host_handle(NetShareHost* share, NetAccess* access, const NetAccessEvent* event);
 
 // After each poll: what the copy has to send, paced as above; a finished copy

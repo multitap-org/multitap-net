@@ -49,24 +49,27 @@ static void test_access_levels()
     check(net_message_required_access(128) == NetAccessLevel::full &&
               net_message_required_access(191) == NetAccessLevel::full,
           "128..191 need full");
-    check(net_message_required_access(NET_MESSAGE_FIRST_OWNER) == NetAccessLevel::owner &&
-              net_message_required_access(255) == NetAccessLevel::owner,
-          "192..255 need owner");
-    check(!net_access_allows(NetAccessLevel::full, NetAccessLevel::owner), "full doesn't reach owner messages");
-    check(net_access_allows(NetAccessLevel::owner, NetAccessLevel::full) &&
-              net_access_allows(NetAccessLevel::owner, NetAccessLevel::gamepad),
-          "owner includes every level below");
+    check(net_message_required_access(NET_MESSAGE_FIRST_SHARE) == NetAccessLevel::share &&
+              net_message_required_access(255) == NetAccessLevel::share,
+          "192..255 need share");
+    check(!net_access_allows(NetAccessLevel::share, NetAccessLevel::full), "share doesn't reach full messages");
+    check(!net_access_allows(NetAccessLevel::stream, NetAccessLevel::share), "stream doesn't reach share messages");
+    check(net_access_allows(NetAccessLevel::full, NetAccessLevel::share) &&
+              net_access_allows(NetAccessLevel::full, NetAccessLevel::gamepad),
+          "full includes every level below");
     NetAccessLevel parsed = NetAccessLevel::gamepad;
-    check(net_access_level_parse("owner", &parsed) && parsed == NetAccessLevel::owner &&
-              std::strcmp(net_access_level_name(NetAccessLevel::owner), "owner") == 0,
-          "owner by name");
-    check(!net_access_level_parse("boss", &parsed) && parsed == NetAccessLevel::owner, "unknown names refused");
+    check(net_access_level_parse("share", &parsed) && parsed == NetAccessLevel::share &&
+              std::strcmp(net_access_level_name(NetAccessLevel::share), "share") == 0,
+          "share by name");
+    check(net_access_level_parse("owner", &parsed) && parsed == NetAccessLevel::full,
+          "the old owner reads as full (it had everything)");
+    check(!net_access_level_parse("boss", &parsed) && parsed == NetAccessLevel::full, "unknown names refused");
 
     uint8_t welcome[64] = {};
-    size_t size = net_message_write_welcome(welcome, sizeof(welcome), NetAccessLevel::owner, "HOST");
+    size_t size = net_message_write_welcome(welcome, sizeof(welcome), NetAccessLevel::share, "HOST");
     NetAccessLevel told = NetAccessLevel::gamepad;
     char host_name[64] = {};
-    check(size > 0 && net_message_read_welcome(welcome, size, &told, host_name) && told == NetAccessLevel::owner,
+    check(size > 0 && net_message_read_welcome(welcome, size, &told, host_name) && told == NetAccessLevel::share,
           "welcome carries owner");
     welcome[1] = NET_ACCESS_LEVEL_COUNT;
     check(!net_message_read_welcome(welcome, size, &told, host_name), "welcome with a level past owner refused");
@@ -744,9 +747,9 @@ static void test_pairing(const char* folder)
     check(loop->host_got_stream_message, "full level: stream message delivered");
     net_trust_load(&saved, host_trust.c_str());
     check(saved.devices.size() == 1 && saved.devices[0].access == NetAccessLevel::full, "access level saved");
-    net_access_set_level(&loop->host, 0, NetAccessLevel::owner);
+    net_access_set_level(&loop->host, 0, NetAccessLevel::share);
     net_trust_load(&saved, host_trust.c_str());
-    check(saved.devices.size() == 1 && saved.devices[0].access == NetAccessLevel::owner, "owner saved");
+    check(saved.devices.size() == 1 && saved.devices[0].access == NetAccessLevel::share, "owner saved");
     net_access_set_level(&loop->host, 0, NetAccessLevel::full);
     pump_for(loop, 100);
 

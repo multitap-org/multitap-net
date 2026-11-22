@@ -134,9 +134,9 @@ static bool read_name(const uint8_t* data, size_t size, char* name)
 
 NetAccessLevel net_message_required_access(uint8_t type)
 {
-    if (type >= NET_MESSAGE_FIRST_OWNER)
+    if (type >= NET_MESSAGE_FIRST_SHARE)
     {
-        return NetAccessLevel::owner;
+        return NetAccessLevel::share;   // below full in rank, above it in numbers
     }
     if (type >= NET_MESSAGE_FIRST_FULL)
     {

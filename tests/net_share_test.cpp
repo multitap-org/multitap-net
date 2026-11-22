@@ -1,7 +1,7 @@
 // Checks net_share.h (files between piccolos): every message written and
 // read back, damaged messages refused (cut, a byte more, unknown statuses,
 // kinds and flags), chunks within their bounds, list results paged so every
-// entry arrives once, and every type in OWNER's range.
+// entry arrives once, and every type in SHARE's range.
 //
 // Usage: frontend_net_share_test
 // Exit code 0 = all checks passed. Each failure is printed.
@@ -31,7 +31,7 @@ static void test_types()
     for (uint32_t type = static_cast<uint32_t>(NetShareMessage::list_request);
          type <= static_cast<uint32_t>(NetShareMessage::cancel); type++)
     {
-        if (net_message_required_access(static_cast<uint8_t>(type)) != NetAccessLevel::owner)
+        if (net_message_required_access(static_cast<uint8_t>(type)) != NetAccessLevel::share)
         {
             std::printf("FAIL share type %u doesn't need owner\n", type);
             g_failures++;

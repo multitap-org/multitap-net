@@ -1,4 +1,4 @@
-// Checks net_share_folders.h (the host's shared folders for OWNER devices):
+// Checks net_share_folders.h (the host's shared folders for SHARE devices):
 // the roots and their names, listings (hidden and part files left out, links
 // leading out left out), gets and puts that never leave the shared folders
 // ("..", backslashes, ':', hidden names, symlinks pointing out, a file where
