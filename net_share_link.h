@@ -48,6 +48,8 @@ struct NetShareLinkStatus
     NetClientRefusal  refusal = NetClientRefusal::none;   // why the last try ended
     NetAccessLevel    access = NetAccessLevel::gamepad;
     std::string       host_name;
+    std::string       code;        // while pairing: the code to show (the host's user types it), else ""
+    bool              waiting_host = false;   // pairing: the host has our request, its user hasn't typed yet
     std::vector<NetShareLinkFound> found;   // piccolos on the LAN, newest first
 };
 

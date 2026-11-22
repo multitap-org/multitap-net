@@ -287,6 +287,10 @@ void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status)
     status->refusal = link->refusal;
     status->access = link->client.access;
     status->host_name = link->state == NetShareLinkState::ready ? link->client.host_name : "";
+    bool pairing = link->state == NetShareLinkState::connecting && link->client.has_code;
+    status->code = pairing ? link->client.code : "";
+    status->waiting_host = pairing && (link->client.state == NetClientState::pairing ||
+                                       link->client.state == NetClientState::confirming);
     status->found.clear();
     for (uint32_t i = 0; i < link->found_count; i++)
     {
