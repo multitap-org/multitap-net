@@ -164,6 +164,9 @@ static void test_messages()
     check(size == 2 && net_guest_read_bye(out, size, &bye) && bye == NetGuestBye::kicked, "bye");
     out[1] = 0;
     check(!net_guest_read_bye(out, size, &bye), "bye without a reason");
+    uint8_t port = 0;
+    size = net_guest_write_port(out, sizeof(out), 2);
+    check(size == 2 && out[0] == 78 && net_guest_read_port(out, size, &port) && port == 2, "port");
 }
 
 static void test_titles()

@@ -431,6 +431,27 @@ bool net_guest_read_bye(const uint8_t* data, size_t size, NetGuestBye* reason)
     return true;
 }
 
+size_t net_guest_write_port(uint8_t* out, size_t capacity, uint8_t port)
+{
+    if (capacity < 2)
+    {
+        return 0;
+    }
+    out[0] = NET_GUEST_PORT_MESSAGE;
+    out[1] = port;
+    return 2;
+}
+
+bool net_guest_read_port(const uint8_t* data, size_t size, uint8_t* port)
+{
+    if (size != 2 || data[0] != NET_GUEST_PORT_MESSAGE)
+    {
+        return false;
+    }
+    *port = data[1];
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // The card
 // ---------------------------------------------------------------------------

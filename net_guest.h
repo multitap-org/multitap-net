@@ -122,6 +122,14 @@ size_t net_guest_write_bye(uint8_t* out, size_t capacity, NetGuestBye reason);
 bool   net_guest_read_bye(const uint8_t* data, size_t size, NetGuestBye* reason);
 constexpr size_t NET_GUEST_MAX_MESSAGE = 1 + NET_GUEST_MAC_SIZE + 1 + NET_GUEST_MAX_NAME;
 
+// host -> guest, an application message in the stream range (a guest gets
+// those): the port its pad plays on, or NET_GUEST_NO_PORT (watching: not
+// joined yet, or no port free). Sent at join and whenever it changes.
+constexpr uint8_t NET_GUEST_PORT_MESSAGE = 78;
+constexpr uint8_t NET_GUEST_NO_PORT = 0xff;
+size_t net_guest_write_port(uint8_t* out, size_t capacity, uint8_t port);
+bool   net_guest_read_port(const uint8_t* data, size_t size, uint8_t* port);
+
 // A game's file name as a card title: "Teenage Mutant Ninja Turtles IV (USA)
 // [!]" -> "Teenage Mutant Ninja Turtles IV" (groups in () and [] dropped,
 // spaces tidied, cut to NET_GUEST_MAX_TITLE bytes at a UTF-8 boundary, no
