@@ -307,6 +307,7 @@ bool net_share_link_connect(NetShareLink* link, NetAddress address, const char* 
     // once the old connection is gone).
     link->connect_pending = true;
     link->connect_beacon = false;
+    link->connect_device = -1;
     link->connect_address = address;
     link->connect_code = code;
     link->state = NetShareLinkState::connecting;
@@ -392,6 +393,10 @@ void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status)
     status->host_name = link->state == NetShareLinkState::ready ? link->client.host_name : "";
     bool pairing = link->state == NetShareLinkState::connecting && link->client.has_code;
     status->code = pairing ? link->client.code : "";
+    if (!pairing && link->state == NetShareLinkState::connecting && link->connect_pending && link->connect_device < 0)
+    {
+        status->code = link->connect_code;   // not handed to the client yet (the beacon's name being looked up)
+    }
     status->waiting_host = pairing && (link->client.state == NetClientState::pairing ||
                                        link->client.state == NetClientState::confirming);
     status->found.clear();
