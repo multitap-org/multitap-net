@@ -1,6 +1,6 @@
 #pragma once
 
-// The client's side of piccolo-share (net_share.h): a piccolo with OWNER
+// The client's side of piccolo-share (net_share.h): a piccolo with SHARE
 // access on another one lists its shared folders and copies files both
 // ways. No transport of its own: whoever owns the connection hands it the
 // host's share messages (net_share_client_handle) and sends what it gives

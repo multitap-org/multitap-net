@@ -1,7 +1,7 @@
 #pragma once
 
 // The host's side of net_share.h: its shared folders (the game folders,
-// SAVES and STATES) as the virtual paths an OWNER device sees, listed,
+// SAVES and STATES) as the virtual paths a SHARE device sees, listed,
 // read and written without ever leaving them.
 //
 // Every path a device sends goes through the same part rules as

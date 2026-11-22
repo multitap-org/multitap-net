@@ -1,11 +1,12 @@
 #pragma once
 
-// The pair link (and its QR code): what a device needs to pair with a host
-// it can't find on the LAN (mobile data, a browser). It carries the host's
-// public key, and the beacon when it isn't the default one. The 6-digit code
-// still has to be typed: the link says who to pair with, the code proves it
-// (net_client_pair_beacon). Knowing a host's key gives nothing else: the
-// pairing room exists only while the host shows its code.
+// A link that names a host: its public key, and the beacon when it isn't the
+// default one (and its QR code, drawn by the frontend).
+//
+// Not used for pairing since 2026-11-22 (the client shows the code and the
+// host types it: net_pairing.h). Kept, with piccolo's QR drawing and
+// piccoletto's link intent, for the links to come (Andrés, 2026-11-22: a QR or
+// a click to join a game from the lobby).
 //
 //   https://get-piccolo.app/pair/#k=<host key, base32>[&b=<beacon>]
 //

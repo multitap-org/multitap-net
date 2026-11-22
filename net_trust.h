@@ -27,18 +27,20 @@
 
 constexpr size_t NET_DEVICE_NAME_MAX = 63;   // bytes of UTF-8
 
-// What a paired device may do on the host (decided 2026-11-19). Each level
-// includes the ones before it. New devices start at gamepad.
+// What a paired device may do on the host (decided 2026-11-19; renamed and
+// reordered 2026-11-22: OWNER became SHARE, FULL is the top). Each level
+// includes the ones before it. The host picks the level when it pairs.
 enum class NetAccessLevel : uint8_t
 {
     gamepad = 0,   // play with its pads (and the game's hotkeys)
     stream = 1,    // + receive the game's video and audio (remote play)
-    full = 2,      // + configure the frontend, browse and load games, take the game (headless)
-    owner = 3,     // + read and write files in the shared folders (piccolo-share, 2026-11-20)
+    share = 2,     // + read and write files in the shared folders (piccolo-share)
+    full = 3,      // + configure the frontend, browse and load games, take the game (headless)
 };
 constexpr uint32_t NET_ACCESS_LEVEL_COUNT = 4;
 
-const char* net_access_level_name(NetAccessLevel level);   // "gamepad", "stream", "full", "owner"
+const char* net_access_level_name(NetAccessLevel level);   // "gamepad", "stream", "share", "full"
+// Also reads "owner" (before 2026-11-22: everything) as full.
 bool net_access_level_parse(const char* name, NetAccessLevel* level);
 
 struct NetTrustedDevice

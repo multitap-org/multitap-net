@@ -49,6 +49,7 @@ constexpr double NET_BEACON_RETRY_SECONDS = 2.0;      // no answer to a REGISTER
 constexpr double NET_BEACON_SILENT_SECONDS = 10.0;    // no answer this long: the server is unreachable
 constexpr double NET_BEACON_MEET_INTERVAL = 0.5;      // the server drops a repeat within 250 ms
 constexpr double NET_BEACON_MEET_SECONDS = 5.0;       // no INTRO by then: give up
+constexpr double NET_BEACON_PATIENT_INTERVAL = 2.0;   // a pairing client waiting for the host to type its code
 constexpr double NET_BEACON_PUNCH_INTERVAL = 0.1;
 constexpr double NET_BEACON_PUNCH_SECONDS = 5.0;
 constexpr double NET_BEACON_CONNECT_AFTER = 1.0;      // no PUNCH from the host by then: connect to the INTRO address
@@ -61,15 +62,17 @@ bool net_beacon_meeting_id(const NetKeypair* own, const uint8_t* other_public_ke
 // BLAKE2b("multitap signal v1" || X25519(own, other)); net_signal.h).
 bool net_beacon_signal_key(const NetKeypair* own, const uint8_t* other_public_key, uint8_t* key);
 
-// The pairing room: where a device that only has the host's key (the pair
-// link or QR, net_pairing.h) meets the host while its pairing is open.
-// BLAKE2b("multitap pair v1" || host key). Anyone with the link can compute
-// it: the 6-digit code (CPace) is what proves the pairing, as on the LAN.
-void net_beacon_pair_id(const uint8_t* host_key, BeaconId* id);
+// The pairing room (2026-11-22): where a client that shows a code meets the
+// host that types it, across the internet. From the code's slot only (its
+// first NET_PAIR_SLOT_DIGITS digits, `slot`): BLAKE2b("multitap pair v2" ||
+// slot). Never from the secret digits: a hash of a million values is ground
+// in a second. Two pairings on the same slot both get introduced; only the
+// code that matches pairs (CPace), the other sees a wrong code.
+void net_beacon_pair_id(const char* slot, BeaconId* id);
 // The key that seals the pairing room's signaling blobs (32 bytes:
-// BLAKE2b("multitap pair signal v1" || host key)). It keeps the WebRTC offer
-// (and so the IPs) from the beacon, not from whoever has the link.
-void net_beacon_pair_signal_key(const uint8_t* host_key, uint8_t* key);
+// BLAKE2b("multitap pair signal v2" || slot)). It only keeps the WebRTC offer
+// from a casual reader; Noise + CPace protect the pairing itself.
+void net_beacon_pair_signal_key(const char* slot, uint8_t* key);
 
 // One server address (a family) as we talk to it.
 struct NetBeaconServer
@@ -161,6 +164,7 @@ struct NetBeaconClient
     double         intro_at = 0.0;
     NetAddress     target;
     bool           heard_punch = false; // the host's PUNCH reached us: its NAT lets us in
+    bool           patient = false;     // pairing: keep meeting until the host comes (no NOT_FOUND / time limit)
     NetBeaconPunch punches[NET_BEACON_MAX_SERVERS * 2];
 };
 

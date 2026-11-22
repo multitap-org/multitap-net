@@ -5,7 +5,6 @@
 
 #include "host_log.h"
 #include "net_link.h"
-#include "net_pair_link.h"
 #include "net_share_host.h"
 
 static double seconds_now()
@@ -121,6 +120,7 @@ static void poll_client(NetShareLink* link)
     {
         link->connect_pending = false;
         link->closing = false;
+        net_client_set_pairing(&link->client, NetAccessLevel::share, NetPairKind::piccolo);   // files: SHARE
         bool started = false;
         if (!link->connect_beacon)
         {
@@ -138,7 +138,9 @@ static void poll_client(NetShareLink* link)
             }
             else
             {
-                started = net_client_pair_beacon(&link->client, link->servers, link->server_count, link->connect_key,
+                // Our code: the other piccolo's user types it in INVITE, which
+                // waits in the code's pairing room (net_access_invite).
+                started = net_client_pair_beacon(&link->client, link->servers, link->server_count,
                                                  link->connect_code.c_str());
             }
             host_log(LogLevel::info, "Network: share: %s through %s (%u address(es))",
@@ -305,6 +307,7 @@ bool net_share_link_connect(NetShareLink* link, NetAddress address, const char* 
     // once the old connection is gone).
     link->connect_pending = true;
     link->connect_beacon = false;
+    link->connect_device = -1;
     link->connect_address = address;
     link->connect_code = code;
     link->state = NetShareLinkState::connecting;
@@ -354,24 +357,16 @@ bool net_share_link_connect_paired(NetShareLink* link, uint32_t device)
     return true;
 }
 
-bool net_share_link_pair_link(NetShareLink* link, const char* pair_link, const char* code)
+bool net_share_link_pair_beacon(NetShareLink* link, const char* code)
 {
-    uint8_t key[NET_KEY_SIZE] = {};
-    std::string link_beacon;
-    if (!net_pair_link_parse(pair_link, key, &link_beacon))
-    {
-        return false;
-    }
     std::lock_guard<std::mutex> guard(link->lock);
-    std::string beacon = link_beacon.empty() ? link->beacon : link_beacon;
-    if (!link->running || beacon.empty())
+    if (!link->running || link->beacon.empty() || code == nullptr || !net_pair_code_valid(code))
     {
         return false;
     }
     link->connect_device = -1;
-    std::memcpy(link->connect_key, key, NET_KEY_SIZE);
-    link->connect_code = code != nullptr ? code : "";
-    connect_through_beacon(link, &beacon);
+    link->connect_code = code;
+    connect_through_beacon(link, &link->beacon);
     return true;
 }
 
@@ -396,6 +391,14 @@ void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status)
     status->refusal = link->refusal;
     status->access = link->client.access;
     status->host_name = link->state == NetShareLinkState::ready ? link->client.host_name : "";
+    bool pairing = link->state == NetShareLinkState::connecting && link->client.has_code;
+    status->code = pairing ? link->client.code : "";
+    if (!pairing && link->state == NetShareLinkState::connecting && link->connect_pending && link->connect_device < 0)
+    {
+        status->code = link->connect_code;   // not handed to the client yet (the beacon's name being looked up)
+    }
+    status->waiting_host = pairing && (link->client.state == NetClientState::pairing ||
+                                       link->client.state == NetClientState::confirming);
     status->found.clear();
     for (uint32_t i = 0; i < link->found_count; i++)
     {

@@ -1,7 +1,7 @@
 #pragma once
 
 // Files between piccolos (piccolo-share, 2026-11-20): a paired device with
-// OWNER access (net_pairing.h: message types 192..255) browses the host's
+// SHARE access (net_pairing.h: message types 192..255) browses the host's
 // shared folders and copies files both ways: games, saves, states.
 //
 // Paths are virtual, like net_content.h's: the first part names one shared

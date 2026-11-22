@@ -19,16 +19,21 @@ const char* net_access_level_name(NetAccessLevel level)
         return "gamepad";
     case NetAccessLevel::stream:
         return "stream";
+    case NetAccessLevel::share:
+        return "share";
     case NetAccessLevel::full:
         return "full";
-    case NetAccessLevel::owner:
-        return "owner";
     }
     return "gamepad";
 }
 
 bool net_access_level_parse(const char* name, NetAccessLevel* level)
 {
+    if (std::strcmp(name, "owner") == 0)
+    {
+        *level = NetAccessLevel::full;   // the old top level keeps everything it had
+        return true;
+    }
     for (uint32_t i = 0; i < NET_ACCESS_LEVEL_COUNT; i++)
     {
         NetAccessLevel candidate = static_cast<NetAccessLevel>(i);

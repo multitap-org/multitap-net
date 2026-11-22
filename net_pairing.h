@@ -8,26 +8,37 @@
 // Every control message starts with a type byte. Types below
 // NET_MESSAGE_FIRST_APP belong to this layer; the rest are the application's,
 // and the type says the access level it needs (net_message_required_access):
-//   16..63 gamepad, 64..127 stream, 128..191 full, 192..255 owner.
+//   16..63 gamepad, 64..127 stream, 128..191 full, 192..255 share.
+// The levels rank gamepad < stream < share < full (net_trust.h): full covers
+// share's range too, share doesn't cover full's.
 // The host drops what a device's level doesn't cover; the client is told its
 // level (welcome) only to show what it can use.
 //
 //   host -> client  welcome          you're a paired device       + access + host name
 //   client -> host  device_name      what I'm called now (after welcome, every connection)
 //   host -> client  pairing_needed   you're not; pairing open?    + host name
-//   client -> host  pair_request     CPace share Ya               + client name
+//   client -> host  pair_request     CPace share Ya + wanted level + kind + client name
 //   host -> client  pair_response    CPace share Yb, host confirm + host name
 //   client -> host  pair_confirm     client confirm
 //   host -> client  pair_result      ok / refused
 //   either side     unpair           I forget you: forget me (then the sender closes)
+//   client -> host  grant_back       right after pairing: you may come to me at this level
 //
 // Unpairing (Andrés, 2026-11-19) starts on either side: if the other side is
 // connected now it's told (unpair) and forgets the sender too; if not, the
 // sender only forgets it locally. The sender closes the connection (only
 // one side may close, net_host.h); the other side just forgets.
 //
-// The 6-digit code (shown by the host, typed on the client) is CPace's
-// password (net_cpace.h). CPace is bound to this exact connection: its session
+// Who starts (Andrés, 2026-11-22): the client. It makes the 9-digit code,
+// shows it, and sends pair_request as soon as the host says it doesn't know
+// it. The host holds the request until its user types the code and picks a
+// level (net_access_answer_pairing), then answers. A client that finds the
+// host's confirm wrong (a mistyped code) makes a new code and sends a new
+// pair_request on the same connection; the host's dialog stays open.
+//
+// The code (shown by the client, typed on the host) is CPace's password
+// (net_cpace.h): all 9 digits. The first 3 are also the slot on the beacon
+// (net_beacon.h) where the two meet across the internet; they're public. CPace is bound to this exact connection: its session
 // id is the Noise handshake hash and its channel id holds both device keys,
 // so a code typed into a connection someone sits in the middle of gives that
 // someone nothing. The names are CPace's associated data (ADa, ADb): each
@@ -54,26 +65,36 @@ enum class NetMessage : uint8_t
     pair_result = 6,
     device_name = 7,
     unpair = 8,
+    grant_back = 9,
 };
 constexpr uint8_t NET_MESSAGE_FIRST_APP = 16;
 constexpr uint8_t NET_MESSAGE_FIRST_STREAM = 64;
 constexpr uint8_t NET_MESSAGE_FIRST_FULL = 128;
-constexpr uint8_t NET_MESSAGE_FIRST_OWNER = 192;   // files (net_share)
+constexpr uint8_t NET_MESSAGE_FIRST_SHARE = 192;   // files (net_share)
 
 // The level an application message type needs.
 NetAccessLevel net_message_required_access(uint8_t type);
 bool net_access_allows(NetAccessLevel have, NetAccessLevel need);
 
-constexpr size_t NET_PAIR_CODE_DIGITS = 6;
+constexpr size_t NET_PAIR_CODE_DIGITS = 9;
+constexpr size_t NET_PAIR_SLOT_DIGITS = 3;   // the code's first digits: its slot on the beacon
+constexpr uint32_t NET_PAIRING_MAX_FAILURES = 5;   // wrong codes per connection, then it closes
 constexpr size_t NET_PAIR_CONFIRM_SIZE = 32;
-constexpr size_t NET_PAIR_CI_SIZE = 15 + 2 * NET_KEY_SIZE;   // "multitap-pair 1" + both keys
+constexpr size_t NET_PAIR_CI_SIZE = 15 + 2 * NET_KEY_SIZE;   // "multitap-pair 2" + both keys
 constexpr size_t NET_PAIR_SID_SIZE = 32;                     // of the handshake hash
 // The largest message here: type + share + confirm + name length + name.
 constexpr size_t NET_PAIR_MAX_MESSAGE = 1 + NET_CPACE_SHARE_SIZE + NET_PAIR_CONFIRM_SIZE + 1 + NET_DEVICE_NAME_MAX;
 
-// A uniformly random 6-digit code ("042917"), NUL-terminated (7 bytes).
+// What kind of program asks to pair (pair_request): the host shows it.
+enum class NetPairKind : uint8_t
+{
+    piccolo = 0,
+    piccoletto = 1,
+};
+
+// A uniformly random 9-digit code ("482193706"), NUL-terminated (10 bytes).
 bool net_pair_code_generate(char* code);
-// Exactly 6 ASCII digits.
+// Exactly 9 ASCII digits.
 bool net_pair_code_valid(const char* code);
 
 // CPace inputs for one connection.
@@ -98,8 +119,10 @@ size_t net_message_write_device_name(uint8_t* out, size_t capacity, const char* 
 bool   net_message_read_device_name(const uint8_t* data, size_t size, char* name);
 size_t net_message_write_pairing_needed(uint8_t* out, size_t capacity, bool open, const char* host_name);
 bool   net_message_read_pairing_needed(const uint8_t* data, size_t size, bool* open, char* host_name);
-size_t net_message_write_pair_request(uint8_t* out, size_t capacity, const uint8_t* share, const char* client_name);
-bool   net_message_read_pair_request(const uint8_t* data, size_t size, uint8_t* share, char* client_name);
+size_t net_message_write_pair_request(uint8_t* out, size_t capacity, const uint8_t* share, NetAccessLevel want,
+                                      NetPairKind kind, const char* client_name);
+bool   net_message_read_pair_request(const uint8_t* data, size_t size, uint8_t* share, NetAccessLevel* want,
+                                     NetPairKind* kind, char* client_name);
 size_t net_message_write_pair_response(uint8_t* out, size_t capacity, const uint8_t* share, const uint8_t* confirm,
                                        const char* host_name);
 bool   net_message_read_pair_response(const uint8_t* data, size_t size, uint8_t* share, uint8_t* confirm,
@@ -108,5 +131,7 @@ size_t net_message_write_pair_confirm(uint8_t* out, size_t capacity, const uint8
 bool   net_message_read_pair_confirm(const uint8_t* data, size_t size, uint8_t* confirm);
 size_t net_message_write_unpair(uint8_t* out, size_t capacity);
 bool   net_message_read_unpair(const uint8_t* data, size_t size);
+size_t net_message_write_grant_back(uint8_t* out, size_t capacity, NetAccessLevel level);
+bool   net_message_read_grant_back(const uint8_t* data, size_t size, NetAccessLevel* level);
 size_t net_message_write_pair_result(uint8_t* out, size_t capacity, bool ok);
 bool   net_message_read_pair_result(const uint8_t* data, size_t size, bool* ok);

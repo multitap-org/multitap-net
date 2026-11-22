@@ -77,6 +77,7 @@ struct NetSignal
     NetRtcSocket* socket = nullptr;
     bool          open = false;
     bool          joined = false;      // the client's JOINED came
+    bool          patient = false;     // a pairing client: waits for the host, joins again as the host does
     double        started = -1.0;      // when this socket was opened
     double        next_join = 0.0;
     double        retry_at = 0.0;
@@ -88,20 +89,20 @@ struct NetSignal
 };
 
 // The host: `url` "" stops. The rooms: one per paired device, from our key
-// and theirs, plus the pairing room while pairing is open (`pairing`; the
-// room comes from our public key, net_beacon_pair_id). Call again when the
-// list changes or pairing opens / closes; rooms that stay keep their peer.
+// and theirs, plus the pairing room of an invite (`pair_slot`: the typed
+// code's slot, net_beacon_pair_id; nullptr = none). Call again when the list
+// changes or an invite starts / ends; rooms that stay keep their peer.
 void net_signal_host_start(NetSignal* signal, const char* url);
 void net_signal_host_set_rooms(NetSignal* signal, const NetKeypair* own, const uint8_t (*device_keys)[NET_KEY_SIZE],
-                               uint32_t count, bool pairing);
+                               uint32_t count, const char* pair_slot);
 
 // The client: meets the host whose key is `host_key`. False if the keys
 // can't be used or there's no WebRTC in this build.
 bool net_signal_client_start(NetSignal* signal, const char* url, const NetKeypair* own, const uint8_t* host_key,
                              double now);
-// The client that pairs: meets the host whose key is `host_key` in its
-// pairing room (open only while the host shows its code).
-bool net_signal_client_start_pair(NetSignal* signal, const char* url, const uint8_t* host_key, double now);
+// The client that pairs: waits in its code's pairing room (`slot`) until a
+// host that typed the code joins (patient: no time limit, no host_offline).
+bool net_signal_client_start_pair(NetSignal* signal, const char* url, const char* slot, double now);
 
 void net_signal_stop(NetSignal* signal);
 
