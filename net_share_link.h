@@ -49,6 +49,7 @@ struct NetShareLinkStatus
     NetAccessLevel    access = NetAccessLevel::gamepad;
     std::string       host_name;
     std::vector<NetShareLinkFound> found;   // piccolos on the LAN, newest first
+    std::vector<std::string> paired;        // the piccolos we paired with (net_share_link_connect_paired's index)
 };
 
 struct NetShareLink
@@ -71,6 +72,19 @@ struct NetShareLink
     bool        connect_pending = false;
     NetAddress  connect_address;
     std::string connect_code;
+    // Across the internet (through the beacon): the pending connect is to
+    // paired host `connect_device`, or pairs (`connect_device` -1) with the
+    // host whose key is `connect_key` (a pair link) and `connect_code`.
+    bool        connect_beacon = false;
+    int32_t     connect_device = -1;
+    uint8_t     connect_key[NET_KEY_SIZE] = {};
+    std::string connect_beacon_name;    // the beacon used for it ("name" or "name:port")
+    // Its addresses, looked up by the thread outside the lock (DNS blocks).
+    bool        resolve_wanted = false;
+    bool        resolved = false;
+    NetAddress  servers[NET_BEACON_MAX_SERVERS];
+    uint32_t    server_count = 0;
+    std::string beacon;                 // the frontend's beacon setting (net_share_link_set_beacon)
 
     NetShareLinkState state = NetShareLinkState::off;
     NetClientRefusal  refusal = NetClientRefusal::none;
@@ -92,6 +106,15 @@ void net_share_link_set_folders(NetShareLink* link, const std::vector<std::strin
 // To a piccolo found on the LAN (or any address): `code` = the 6 digits it
 // shows to pair, "" when we're paired already. Closes a connection first.
 bool net_share_link_connect(NetShareLink* link, NetAddress address, const char* code);
+// Across the internet, through the beacon (UDP hole punching, then WebRTC
+// through its signaling; net_client_connect_beacon): `server` is the
+// frontend's beacon setting ("" = none: the calls below fail).
+void net_share_link_set_beacon(NetShareLink* link, const char* server);
+// To a piccolo we paired with (the index into the status' `paired`).
+bool net_share_link_connect_paired(NetShareLink* link, uint32_t device);
+// Pairs with the piccolo a pair link names (its beacon, or ours when the
+// link has none) and the 6 digits it shows. False if `pair_link` isn't one.
+bool net_share_link_pair_link(NetShareLink* link, const char* pair_link, const char* code);
 void net_share_link_disconnect(NetShareLink* link);
 
 void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status);
