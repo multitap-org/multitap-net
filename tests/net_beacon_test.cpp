@@ -266,6 +266,21 @@ static void test_end_to_end(const std::string& dir)
           "the client keeps the host's key");
     net_access_end_invite(world.host);
     world.invite_code.clear();
+
+    // Presence: the host registers the tablet's meeting id now, so the
+    // tablet sees it online without meeting it.
+    for (int i = 0; i < 200; i++)   // the host's REGISTER with the new id
+    {
+        pump(&world);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    net_client_ask_presence(world.client, &world.beacon_address, 1);
+    for (int i = 0; i < 400 && !(world.client->online.size() == 1 && world.client->online[0] == 1); i++)
+    {
+        pump(&world);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    check(world.client->online.size() == 1 && world.client->online[0] == 1, "presence: the paired host is online");
     net_client_destroy(world.client);
     delete world.client;
     world.client = nullptr;

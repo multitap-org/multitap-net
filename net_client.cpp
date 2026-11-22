@@ -470,6 +470,25 @@ bool net_client_poll(NetClient* client, NetClientEvent* event)
             net_signal_outgoing(&client->signal, session_event.peer, session_event.data, session_event.size);
             continue;
         }
+        if (session_event.type == NetSessionEventType::beacon &&
+            session_event.beacon.type == BeaconType::PRESENT)
+        {
+            uint64_t round = session_event.beacon.nonce - client->presence_base;
+            if (client->presence_base != 0 && round < (client->online_pending.size() + 7) / 8)
+            {
+                for (uint32_t bit = 0; bit < BEACON_MAX_IDS; bit++)
+                {
+                    size_t device = static_cast<size_t>(round) * BEACON_MAX_IDS + bit;
+                    if (device < client->online_pending.size() && (session_event.beacon.present & (1u << bit)) != 0)
+                    {
+                        client->online_pending[device] = 1;
+                    }
+                }
+                client->online = client->online_pending;
+                client->presence_answered = true;
+            }
+            continue;
+        }
         if (session_event.type == NetSessionEventType::beacon)
         {
             if (client->via_beacon)
@@ -641,4 +660,36 @@ size_t net_client_pending(const NetClient* client)
         return 0;
     }
     return net_host_peer_pending(&client->session.host, client->peer);
+}
+
+void net_client_ask_presence(NetClient* client, const NetAddress* servers, uint32_t count)
+{
+    size_t devices = client->trust.devices.size();
+    client->online_pending.assign(devices, 0);
+    if (client->online.size() != devices)
+    {
+        client->online.assign(devices, 0);
+    }
+    if (devices == 0 || count == 0)
+    {
+        return;
+    }
+    // A new range of nonces per round, so a late answer from the last one is
+    // told apart (it falls outside).
+    client->presence_base = (client->presence_base == 0 ? 0x10000u : client->presence_base) + 0x100u;
+    for (size_t first = 0; first < devices; first += BEACON_MAX_IDS)
+    {
+        BeaconId ids[BEACON_MAX_IDS];
+        uint32_t id_count = 0;
+        for (size_t i = first; i < devices && id_count < BEACON_MAX_IDS; i++)
+        {
+            if (!net_beacon_meeting_id(&client->session.identity, client->trust.devices[i].key, &ids[id_count]))
+            {
+                std::memset(ids[id_count].bytes, 0xff, BEACON_ID_SIZE);   // can't be met: asks for nothing real
+            }
+            id_count++;
+        }
+        net_beacon_ask_presence(&client->session.host, servers, count, ids, id_count,
+                                client->presence_base + first / BEACON_MAX_IDS);
+    }
 }

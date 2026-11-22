@@ -50,6 +50,7 @@ constexpr double NET_BEACON_SILENT_SECONDS = 10.0;    // no answer this long: th
 constexpr double NET_BEACON_MEET_INTERVAL = 0.5;      // the server drops a repeat within 250 ms
 constexpr double NET_BEACON_MEET_SECONDS = 5.0;       // no INTRO by then: give up
 constexpr double NET_BEACON_PATIENT_INTERVAL = 2.0;   // a pairing client waiting for the host to type its code
+constexpr double NET_BEACON_PATIENT_SECONDS = 1800.0; // and at most this long (then host_offline)
 constexpr double NET_BEACON_PUNCH_INTERVAL = 0.1;
 constexpr double NET_BEACON_PUNCH_SECONDS = 5.0;
 constexpr double NET_BEACON_CONNECT_AFTER = 1.0;      // no PUNCH from the host by then: connect to the INTRO address
@@ -73,6 +74,12 @@ void net_beacon_pair_id(const char* slot, BeaconId* id);
 // BLAKE2b("multitap pair signal v2" || slot)). It only keeps the WebRTC offer
 // from a casual reader; Noise + CPace protect the pairing itself.
 void net_beacon_pair_signal_key(const char* slot, uint8_t* key);
+
+// Presence (2026-11-22): asks every server which of `ids` (1..BEACON_MAX_IDS)
+// are registered now; PRESENT answers with `nonce` and one bit per id. For
+// lists' ONLINE / OFFLINE: no meeting starts and the host isn't told.
+bool net_beacon_ask_presence(NetHost* host, const NetAddress* servers, uint32_t count, const BeaconId* ids,
+                             uint32_t id_count, uint64_t nonce);
 
 // One server address (a family) as we talk to it.
 struct NetBeaconServer
