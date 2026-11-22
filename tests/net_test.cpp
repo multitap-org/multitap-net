@@ -38,6 +38,30 @@ static void check(bool condition, const char* what)
 }
 
 // The levels, the message ranges and the names in the device list.
+// Pairing codes: nine digits, all of them random (the first three are the
+// beacon slot: always 000 would put every pairing in one room).
+static void test_pair_codes()
+{
+    bool valid = true;
+    bool slots_vary = false;
+    char first_slot[NET_PAIR_SLOT_DIGITS + 1] = {};
+    for (int32_t i = 0; i < 64; i++)
+    {
+        char code[NET_PAIR_CODE_DIGITS + 1];
+        valid = valid && net_pair_code_generate(code) && net_pair_code_valid(code);
+        if (i == 0)
+        {
+            std::memcpy(first_slot, code, NET_PAIR_SLOT_DIGITS);
+        }
+        else if (std::memcmp(first_slot, code, NET_PAIR_SLOT_DIGITS) != 0)
+        {
+            slots_vary = true;
+        }
+    }
+    check(valid, "codes are 9 digits");
+    check(slots_vary, "the slot digits are random too");
+}
+
 static void test_access_levels()
 {
     check(net_message_required_access(16) == NetAccessLevel::gamepad &&
@@ -923,6 +947,7 @@ int main(int argc, char** argv)
         std::printf("FAIL net_init\n");
         return 1;
     }
+    test_pair_codes();
     test_loopback();
     test_ipv6();
     test_session();

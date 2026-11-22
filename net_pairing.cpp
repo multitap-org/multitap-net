@@ -13,8 +13,9 @@ static constexpr uint8_t CONFIRM_CLIENT[20] = {'m', 'u', 'l', 't', 'i', 't', 'a'
 
 bool net_pair_code_generate(char* code)
 {
-    // Rejection sampling keeps every code equally likely: 4294000000 is the
-    // largest multiple of 10^6 below 2^32.
+    // All nine digits random (the slot too: a code made only of six left
+    // every slot at 000). Rejection sampling keeps every code equally likely:
+    // 4000000000 is the largest multiple of 10^9 below 2^32.
     uint32_t value = 0;
     do
     {
@@ -25,8 +26,8 @@ bool net_pair_code_generate(char* code)
         }
         value = static_cast<uint32_t>(bytes[0]) | (static_cast<uint32_t>(bytes[1]) << 8) |
                 (static_cast<uint32_t>(bytes[2]) << 16) | (static_cast<uint32_t>(bytes[3]) << 24);
-    } while (value >= 4294000000u);
-    value %= 1000000u;
+    } while (value >= 4000000000u);
+    value %= 1000000000u;
     for (int32_t i = static_cast<int32_t>(NET_PAIR_CODE_DIGITS) - 1; i >= 0; i--)
     {
         code[i] = static_cast<char>('0' + value % 10);
