@@ -13,6 +13,7 @@
 
 #include "net_rtc.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -161,7 +162,14 @@ static void RTC_API on_log(rtcLogLevel level, const char* message)
     {
         ours = LogLevel::warning;
     }
-    host_log(ours, "WebRTC: %s", message);
+    // With MULTITAP_RTC_LOG: the time since the first line, to see the gaps.
+    static double first = -1.0;
+    double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (first < 0.0)
+    {
+        first = now;
+    }
+    host_log(ours, "WebRTC: [%.3f] %s", now - first, message);
 }
 
 // How much libdatachannel says: warnings, or more with MULTITAP_RTC_LOG=info /
