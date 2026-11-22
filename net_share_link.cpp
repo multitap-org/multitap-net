@@ -118,6 +118,7 @@ static void poll_client(NetShareLink* link)
     {
         link->connect_pending = false;
         link->closing = false;
+        net_client_set_pairing(&link->client, NetAccessLevel::share, NetPairKind::piccolo);   // files: SHARE
         bool started = net_client_connect(&link->client, link->connect_address,
                                           link->connect_code.empty() ? nullptr : link->connect_code.c_str());
         link->state = started ? NetShareLinkState::connecting : NetShareLinkState::idle;

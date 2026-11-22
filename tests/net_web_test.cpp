@@ -29,7 +29,6 @@
 #include "host_fs.h"
 #include "net_access.h"
 #include "net_client.h"
-#include "net_pair_link.h"
 #include "net_rtc.h"
 
 static int g_failures = 0;
@@ -226,7 +225,8 @@ static void test_flow(const char* url)
     check(access_authorized, "host authorized the paired device");
     check(net_host_peer_transport(&phone->session.host, phone->peer) == NetTransport::rtc, "over WebRTC");
 
-    // Pairing from the browser with the pair link (the host's key) and the code.
+    // Pairing from the browser (2026-11-22): the tablet shows a code and waits
+    // in its slot's room; the host's user types it in INVITE.
     NetTrust empty;
     net_trust_save(&empty, "/tmp/net_web/tablet_hosts.cfg");
     NetKeypair tablet_key;
@@ -234,20 +234,10 @@ static void test_flow(const char* url)
     NetClient* tablet = new NetClient();
     check(net_client_create(tablet, &tablet_key, "TABLET", "/tmp/net_web/tablet_hosts.cfg"), "tablet created");
     net_client_set_signal(tablet, url, nullptr);
-    std::string link = net_pair_link(host_key.public_key, nullptr);
-    uint8_t link_key[NET_KEY_SIZE];
-    std::string link_beacon;
-    check(net_pair_link_parse(link.c_str(), link_key, &link_beacon), "pair link read");
-    check(net_access_open_pairing(access), "host opens pairing");
-    for (int i = 0; i < 40; i++)
-    {
-        NetAccessEvent ignored;
-        while (net_access_poll(access, &ignored))
-        {
-        }
-        sleep_ms(5);
-    }
-    check(net_client_pair_beacon(tablet, nullptr, 0, link_key, access->code), "tablet pairs through the room");
+    char code[NET_PAIR_CODE_DIGITS + 1];
+    net_pair_code_generate(code);
+    check(net_client_pair_beacon(tablet, nullptr, 0, code), "tablet waits in its room");
+    check(net_access_invite(access, code), "host's user types the code");
     bool tablet_ready = false;
     bool host_paired = false;
     for (int i = 0; i < 3000 && !(tablet_ready && host_paired); i++)
@@ -256,6 +246,10 @@ static void test_flow(const char* url)
         while (net_access_poll(access, &access_event))
         {
             host_paired = host_paired || access_event.type == NetAccessEventType::paired;
+            if (access_event.type == NetAccessEventType::pairing_requested)
+            {
+                net_access_answer_pairing(access, access_event.peer, code, NetAccessLevel::gamepad);
+            }
         }
         NetClientEvent tablet_event;
         while (net_client_poll(tablet, &tablet_event))

@@ -70,6 +70,7 @@ void net_signal_stop(NetSignal* signal)
     signal->url.clear();
     signal->rooms.clear();
     signal->failure = NetSignalFailure::none;
+    signal->patient = false;
 }
 
 void net_signal_host_start(NetSignal* signal, const char* url)
@@ -97,14 +98,14 @@ static void keep_peer(const NetSignal* signal, NetSignalRoom* room)
 }
 
 void net_signal_host_set_rooms(NetSignal* signal, const NetKeypair* own, const uint8_t (*device_keys)[NET_KEY_SIZE],
-                               uint32_t count, bool pairing)
+                               uint32_t count, const char* pair_slot)
 {
     std::vector<NetSignalRoom> rooms;
-    if (pairing)
+    if (pair_slot != nullptr)
     {
         NetSignalRoom room;
-        net_beacon_pair_id(own->public_key, &room.room);
-        net_beacon_pair_signal_key(own->public_key, room.key);
+        net_beacon_pair_id(pair_slot, &room.room);
+        net_beacon_pair_signal_key(pair_slot, room.key);
         keep_peer(signal, &room);
         rooms.push_back(room);
     }
@@ -145,13 +146,14 @@ bool net_signal_client_start(NetSignal* signal, const char* url, const NetKeypai
     return signal->socket != nullptr;
 }
 
-bool net_signal_client_start_pair(NetSignal* signal, const char* url, const uint8_t* host_key, double now)
+bool net_signal_client_start_pair(NetSignal* signal, const char* url, const char* slot, double now)
 {
     net_signal_stop(signal);
     NetSignalRoom room;
-    net_beacon_pair_id(host_key, &room.room);
-    net_beacon_pair_signal_key(host_key, room.key);
+    net_beacon_pair_id(slot, &room.room);
+    net_beacon_pair_signal_key(slot, room.key);
     signal->role = NetSignalRole::client;
+    signal->patient = true;
     signal->url = url;
     signal->rooms.push_back(room);
     signal->socket = net_rtc_socket_open(url);
@@ -289,7 +291,7 @@ static void on_message(NetSignal* signal, NetSession* session, const uint8_t* da
         if (client)
         {
             signal->joined = true;
-            if (message.peer_present == 0)
+            if (message.peer_present == 0 && !signal->patient)
             {
                 signal->failure = NetSignalFailure::host_offline;
             }
@@ -309,7 +311,7 @@ static void on_message(NetSignal* signal, NetSession* session, const uint8_t* da
         }
         break;
     case BeaconSignalingType::NOT_FOUND:
-        if (client && net_signal_client_peer(signal) == NET_NO_PEER)
+        if (client && !signal->patient && net_signal_client_peer(signal) == NET_NO_PEER)
         {
             signal->failure = NetSignalFailure::host_offline;
         }
@@ -383,7 +385,7 @@ void net_signal_update(NetSignal* signal, NetSession* session, double now)
             return;
         }
     }
-    if (signal->role == NetSignalRole::host && signal->open && now >= signal->next_join)
+    if ((signal->role == NetSignalRole::host || signal->patient) && signal->open && now >= signal->next_join)
     {
         join_all(signal);
         signal->next_join = now + NET_SIGNAL_JOIN_SECONDS;

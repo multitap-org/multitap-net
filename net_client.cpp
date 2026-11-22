@@ -25,6 +25,25 @@ static void forget_secrets(NetClient* client)
     crypto_wipe(client->code, sizeof(client->code));
     net_cpace_wipe(&client->cpace);
     client->has_code = false;
+    client->failures = 0;
+    client->just_paired = false;
+}
+
+void net_client_set_pairing(NetClient* client, NetAccessLevel want, NetPairKind kind)
+{
+    client->want = want;
+    client->kind = kind;
+}
+
+bool net_client_grant_back(NetClient* client, NetAccessLevel level)
+{
+    if (client->state != NetClientState::ready || !client->just_paired)
+    {
+        return false;
+    }
+    client->just_paired = false;
+    size_t size = net_message_write_grant_back(client->out.data(), client->out.size(), level);
+    return size > 0 && net_session_send(&client->session, client->peer, NetChannel::control, client->out.data(), size);
 }
 
 void net_client_destroy(NetClient* client)
@@ -76,9 +95,10 @@ static bool start_signal(NetClient* client)
     {
         return false;
     }
+    char slot[NET_PAIR_SLOT_DIGITS + 1] = {};
+    std::memcpy(slot, client->code, NET_PAIR_SLOT_DIGITS);
     bool started = client->meet_pairing
-                       ? net_signal_client_start_pair(&client->signal, client->signal_url.c_str(), client->meet_key,
-                                                      net_seconds())
+                       ? net_signal_client_start_pair(&client->signal, client->signal_url.c_str(), slot, net_seconds())
                        : net_signal_client_start(&client->signal, client->signal_url.c_str(),
                                                  &client->session.identity, client->meet_key, net_seconds());
     if (!started)
@@ -124,8 +144,7 @@ bool net_client_connect_beacon(NetClient* client, const NetAddress* servers, uin
     return start_meeting(client, servers, count, &id);
 }
 
-bool net_client_pair_beacon(NetClient* client, const NetAddress* servers, uint32_t count, const uint8_t* host_key,
-                            const char* code)
+bool net_client_pair_beacon(NetClient* client, const NetAddress* servers, uint32_t count, const char* code)
 {
     if (client->state != NetClientState::idle || code == nullptr || !net_pair_code_valid(code))
     {
@@ -134,16 +153,19 @@ bool net_client_pair_beacon(NetClient* client, const NetAddress* servers, uint32
     forget_secrets(client);
     std::memcpy(client->code, code, NET_PAIR_CODE_DIGITS + 1);
     client->has_code = true;
-    std::memcpy(client->meet_key, host_key, NET_KEY_SIZE);
+    std::memset(client->meet_key, 0, NET_KEY_SIZE);   // we don't know who will type it
     client->meet_pairing = true;
-    client->expect_key = true;
+    client->expect_key = false;
+    char slot[NET_PAIR_SLOT_DIGITS + 1] = {};
+    std::memcpy(slot, code, NET_PAIR_SLOT_DIGITS);
     BeaconId id;
-    net_beacon_pair_id(host_key, &id);
+    net_beacon_pair_id(slot, &id);
     if (!start_meeting(client, servers, count, &id))
     {
         forget_secrets(client);
         return false;
     }
+    client->beacon.patient = true;   // the host joins when its user has typed the code
     return true;
 }
 
@@ -262,7 +284,7 @@ static void start_pairing(NetClient* client)
         return;
     }
     send_control(client, net_message_write_pair_request(client->out.data(), client->out.size(), client->cpace.share,
-                                                        client->name.c_str()));
+                                                        client->want, client->kind, client->name.c_str()));
     client->state = NetClientState::pairing;
 }
 
@@ -290,9 +312,17 @@ static void on_pair_response(NetClient* client, const uint8_t* data, size_t size
     }
     if (!finished || crypto_verify32(their_confirm, expected) != 0)
     {
-        // The host's key doesn't match ours: a different code (or someone in
-        // the middle). Closing counts as a failed attempt on the host.
-        refuse(client, NetClientRefusal::wrong_code, true, event);
+        // The host's key doesn't match ours: its user typed the code wrong (or
+        // someone sits in the middle). A new code, and we ask again.
+        crypto_wipe(client->isk, sizeof(client->isk));
+        client->failures++;
+        if (client->failures >= NET_PAIRING_MAX_FAILURES || !net_pair_code_generate(client->code))
+        {
+            refuse(client, NetClientRefusal::wrong_code, true, event);
+            return;
+        }
+        start_pairing(client);
+        event->type = NetClientEventType::code_changed;
         return;
     }
     std::snprintf(client->host_name, sizeof(client->host_name), "%s", host_name);
@@ -405,15 +435,16 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
             }
             forget_secrets(client);
             client->device = static_cast<int32_t>(device);
-            client->access = NetAccessLevel::gamepad;   // where every new device starts
+            client->access = client->want;   // until the welcome that follows says what the host gave
             client->state = NetClientState::ready;
+            client->just_paired = true;
             event->type = NetClientEventType::ready;
             event->newly_paired = true;
             event->access = client->access;
             event->device = client->device;
             return;
         }
-        refuse(client, NetClientRefusal::wrong_code, false, event);   // the host closes after a refused result
+        refuse(client, NetClientRefusal::refused, false, event);   // the host closes after a refused result
         return;
     }
     refuse(client, NetClientRefusal::connection, true, event);   // a message out of place

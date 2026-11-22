@@ -1,5 +1,7 @@
 #include "net_beacon.h"
 
+#include "net_pairing.h"
+
 #include <cstring>
 
 #include <monocypher.h>
@@ -9,8 +11,8 @@
 
 static const char MEETING_ID_PREFIX[] = "multitap beacon v1";
 static const char SIGNAL_KEY_PREFIX[] = "multitap signal v1";
-static const char PAIR_ID_PREFIX[] = "multitap pair v1";
-static const char PAIR_SIGNAL_KEY_PREFIX[] = "multitap pair signal v1";
+static const char PAIR_ID_PREFIX[] = "multitap pair v2";
+static const char PAIR_SIGNAL_KEY_PREFIX[] = "multitap pair signal v2";
 
 // BLAKE2b(prefix || X25519(own, other)), `size` bytes. False for a shared
 // secret of all zeros (a key that can't be used).
@@ -47,24 +49,24 @@ bool net_beacon_signal_key(const NetKeypair* own, const uint8_t* other_public_ke
     return derive(own, other_public_key, SIGNAL_KEY_PREFIX, sizeof(SIGNAL_KEY_PREFIX) - 1, key, 32);
 }
 
-// BLAKE2b(prefix || host key), `size` bytes.
-static void derive_public(const uint8_t* host_key, const char* prefix, size_t prefix_size, uint8_t* out, size_t size)
+// BLAKE2b(prefix || slot digits), `size` bytes.
+static void derive_slot(const char* slot, const char* prefix, size_t prefix_size, uint8_t* out, size_t size)
 {
     crypto_blake2b_ctx context;
     crypto_blake2b_init(&context, size);
     crypto_blake2b_update(&context, reinterpret_cast<const uint8_t*>(prefix), prefix_size);
-    crypto_blake2b_update(&context, host_key, NET_KEY_SIZE);
+    crypto_blake2b_update(&context, reinterpret_cast<const uint8_t*>(slot), NET_PAIR_SLOT_DIGITS);
     crypto_blake2b_final(&context, out);
 }
 
-void net_beacon_pair_id(const uint8_t* host_key, BeaconId* id)
+void net_beacon_pair_id(const char* slot, BeaconId* id)
 {
-    derive_public(host_key, PAIR_ID_PREFIX, sizeof(PAIR_ID_PREFIX) - 1, id->bytes, BEACON_ID_SIZE);
+    derive_slot(slot, PAIR_ID_PREFIX, sizeof(PAIR_ID_PREFIX) - 1, id->bytes, BEACON_ID_SIZE);
 }
 
-void net_beacon_pair_signal_key(const uint8_t* host_key, uint8_t* key)
+void net_beacon_pair_signal_key(const char* slot, uint8_t* key)
 {
-    derive_public(host_key, PAIR_SIGNAL_KEY_PREFIX, sizeof(PAIR_SIGNAL_KEY_PREFIX) - 1, key, 32);
+    derive_slot(slot, PAIR_SIGNAL_KEY_PREFIX, sizeof(PAIR_SIGNAL_KEY_PREFIX) - 1, key, 32);
 }
 
 const char* net_beacon_status_name(NetBeaconStatus status)
@@ -502,7 +504,7 @@ void net_beacon_client_update(NetBeaconClient* beacon, NetHost* host, double now
 {
     if (beacon->state == NetBeaconMeetState::meeting)
     {
-        if (now - beacon->started > NET_BEACON_MEET_SECONDS)
+        if (!beacon->patient && now - beacon->started > NET_BEACON_MEET_SECONDS)
         {
             beacon->state = NetBeaconMeetState::failed;
             beacon->failure = beacon->not_found > 0 ? NetBeaconFailure::host_offline : NetBeaconFailure::unreachable;
@@ -518,7 +520,7 @@ void net_beacon_client_update(NetBeaconClient* beacon, NetHost* host, double now
             {
                 send_message(host, beacon->servers[i], &meet);
             }
-            beacon->next_meet = now + NET_BEACON_MEET_INTERVAL;
+            beacon->next_meet = now + (beacon->patient ? NET_BEACON_PATIENT_INTERVAL : NET_BEACON_MEET_INTERVAL);
         }
         return;
     }
@@ -600,6 +602,10 @@ bool net_beacon_client_receive(NetBeaconClient* beacon, NetHost* host, const Bea
     }
     if (message->type == BeaconType::NOT_FOUND && beacon->state == NetBeaconMeetState::meeting)
     {
+        if (beacon->patient)
+        {
+            return true;   // not there yet: the next MEET asks again
+        }
         beacon->not_found |= 1u << static_cast<uint32_t>(server);
         if (beacon->not_found == (1u << beacon->server_count) - 1u)
         {

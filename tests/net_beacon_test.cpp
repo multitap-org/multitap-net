@@ -20,7 +20,6 @@
 #include "net_access.h"
 #include "net_beacon.h"
 #include "net_client.h"
-#include "net_pair_link.h"
 
 static int g_failures = 0;
 
@@ -35,6 +34,7 @@ static void check(bool condition, const char* what)
 
 struct World
 {
+    std::string  invite_code;   // the code the host's user typed in INVITE: answers requests with it
     BeaconServer server;
     BeaconNet    net;
     NetAccess*   host = nullptr;
@@ -64,6 +64,10 @@ static void pump(World* world)
         if (host_event.type == NetAccessEventType::paired)
         {
             world->host_paired = true;
+        }
+        if (host_event.type == NetAccessEventType::pairing_requested && !world->invite_code.empty())
+        {
+            net_access_answer_pairing(world->host, host_event.peer, world->invite_code.c_str(), NetAccessLevel::gamepad);
         }
     }
     if (world->client != nullptr)
@@ -231,14 +235,8 @@ static void test_end_to_end(const std::string& dir)
     delete world.client;
     world.client = nullptr;
 
-    // Pairing across the internet: a new device with only the pair link
-    // (the host's key) and the code, met in the host's pairing room.
-    std::string link = net_pair_link(host_key.public_key, nullptr);
-    uint8_t link_key[NET_KEY_SIZE];
-    std::string link_beacon;
-    check(net_pair_link_parse(link.c_str(), link_key, &link_beacon) &&
-              std::memcmp(link_key, host_key.public_key, NET_KEY_SIZE) == 0 && link_beacon.empty(),
-          "pair link round trip");
+    // Pairing across the internet (2026-11-22): the client shows a code and
+    // waits in its slot's pairing room; the host's user types it in INVITE.
     NetKeypair tablet_key;
     net_keypair_generate(&tablet_key);
     std::string tablet_trust = dir + "/tablet_hosts.cfg";
@@ -248,26 +246,26 @@ static void test_end_to_end(const std::string& dir)
     world.client_refused = false;
     world.client_ready = false;
     net_client_create(world.client, &tablet_key, "TABLET", tablet_trust.c_str());
-    check(net_client_pair_beacon(world.client, &world.beacon_address, 1, link_key, "123456"),
-          "pairing while the host isn't pairing");
-    check(pump_until(&world, &world.client_refused, 8000) && world.refusal == NetClientRefusal::host_offline,
-          "no pairing room: host_offline");
-    check(net_access_open_pairing(world.host), "host opens pairing");
-    for (int i = 0; i < 100; i++)   // its REGISTER with the pairing room
+    char code[NET_PAIR_CODE_DIGITS + 1];
+    net_pair_code_generate(code);
+    check(net_client_pair_beacon(world.client, &world.beacon_address, 1, code), "the client waits for a host");
+    for (int i = 0; i < 1200 && !world.client_refused; i++)   // 6 s: longer than a meeting's time limit
     {
         pump(&world);
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    world.client_refused = false;
-    check(net_client_pair_beacon(world.client, &world.beacon_address, 1, link_key, world.host->code),
-          "pairing through the beacon");
-    check(pump_until(&world, &world.client_ready, 8000), "client paired and ready");
+    check(!world.client_refused && world.client->state == NetClientState::meeting,
+          "nobody typed it yet: still waiting (no host_offline)");
+    world.invite_code = code;
+    check(net_access_invite(world.host, code), "the host's user types the code in INVITE");
+    check(pump_until(&world, &world.client_ready, 12000), "client paired and ready");
     check(world.newly_paired, "as newly paired");
     check(pump_until(&world, &world.host_paired, 2000), "host saw the new device");
     check(world.client->trust.devices.size() == 1 &&
               std::memcmp(world.client->trust.devices[0].key, host_key.public_key, NET_KEY_SIZE) == 0,
           "the client keeps the host's key");
-    check(!world.host->pairing_open, "pairing closed after it");
+    net_access_end_invite(world.host);
+    world.invite_code.clear();
     net_client_destroy(world.client);
     delete world.client;
     world.client = nullptr;

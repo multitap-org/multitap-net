@@ -1,7 +1,8 @@
 #pragma once
 
 // The client side (piccoletto, another piccolo, net_probe): connect to a host,
-// pair with the code it shows, or be welcomed as a device it already paired.
+// pair with the code we show (the host's user types it), or be welcomed as a
+// device it already paired.
 // On top of net_session.h and net_trust.h (the hosts this client paired
 // with), running net_pairing.h's flow.
 //
@@ -37,7 +38,8 @@ enum class NetClientRefusal
     none,
     not_paired,       // the host doesn't know us and we have no code
     pairing_closed,   // the host isn't pairing now
-    wrong_code,       // the code didn't match (or the pairing was refused)
+    wrong_code,       // the host typed our codes wrong NET_PAIRING_MAX_FAILURES times
+    refused,          // the host's user refused us
     unknown_host,     // it welcomed us but its key isn't one we paired with
     connection,       // the connection failed or dropped
     beacon_unreachable,   // across the internet: no beacon server answered
@@ -54,6 +56,7 @@ enum class NetClientEventType
     message,   // from the host: `data`/`size` on `channel`
     closed,    // the host went away after ready
     unpaired,  // the host unpaired us: it's gone from our list too (`closed` follows when it closes)
+    code_changed,   // the host typed our code wrong: show the new one (client->code); still pairing
 };
 
 struct NetClientEvent
@@ -78,6 +81,10 @@ struct NetClient
     NetClientState state = NetClientState::idle;
     uint32_t       peer = NET_NO_PEER;
     bool           has_code = false;
+    uint32_t       failures = 0;         // codes the host typed wrong on this connection
+    NetAccessLevel want = NetAccessLevel::gamepad;   // the level we ask for (net_client_set_pairing)
+    NetPairKind  kind = NetPairKind::piccolo;
+    bool           just_paired = false;  // may grant_back on this connection
     char           code[NET_PAIR_CODE_DIGITS + 1] = {};
     uint8_t        host_key[NET_KEY_SIZE] = {};
     uint8_t        handshake_hash[NET_HASH_SIZE] = {};
@@ -103,9 +110,17 @@ struct NetClient
 bool net_client_create(NetClient* client, const NetKeypair* identity, const char* name, const char* trust_path);
 void net_client_destroy(NetClient* client);
 
-// `code` = the 6 digits the host shows, or nullptr to connect as an already
-// paired device.
+// `code` = the 9 digits we show (net_pair_code_generate), or nullptr to
+// connect as an already paired device. With a code we ask to pair at once and
+// wait (as long as it takes) for the host's user to type it; if it's typed
+// wrong we make a new one (code_changed) and ask again.
 bool net_client_connect(NetClient* client, NetAddress address, const char* code);
+// What a pair_request asks for (the host's user decides).
+void net_client_set_pairing(NetClient* client, NetAccessLevel want, NetPairKind kind);
+// Right after pairing (ready with newly_paired), on that connection: lets the
+// host come to us at `level` (it adds us as a host it may connect to). The
+// caller adds the host to its own NetAccess (net_access_add_device).
+bool net_client_grant_back(NetClient* client, NetAccessLevel level);
 // Across the internet: to the host at `device` in our paired list, through a
 // beacon (`servers`: its addresses, net_address_resolve). `ready` or `refused`
 // follows as with net_client_connect; pairing needs the LAN.
@@ -113,14 +128,11 @@ bool net_client_connect(NetClient* client, NetAddress address, const char* code)
 // if that fails (or `count` is 0, as in a browser) and signaling is set,
 // WebRTC through the beacon's signaling. The refusals are the same either way.
 bool net_client_connect_beacon(NetClient* client, const NetAddress* servers, uint32_t count, uint32_t device);
-// Pairs across the internet with a host known only by its key (the pair
-// link or QR: net_pair_link_parse) and the 6-digit `code` it shows: the same
-// flow as net_client_connect_beacon (UDP, then WebRTC), met in the host's
-// pairing room, which is there only while the host has pairing open (else
-// host_offline). The host has to have that key (else unknown_host): the link
-// says who we pair with, the code proves it, as on the LAN.
-bool net_client_pair_beacon(NetClient* client, const NetAddress* servers, uint32_t count, const uint8_t* host_key,
-                            const char* code);
+// Pairs across the internet with the host whose user types our `code` in its
+// INVITE: we wait in the pairing room of the code's slot on the beacon
+// (patient: no time limit) until the host joins it, then pair as on the LAN.
+// UDP when `count` > 0, else WebRTC through the signaling (a browser).
+bool net_client_pair_beacon(NetClient* client, const NetAddress* servers, uint32_t count, const char* code);
 // The beacon's signaling (net_signal_url / net_signal_stun); "" = none.
 void net_client_set_signal(NetClient* client, const char* url, const char* stun);
 bool net_client_poll(NetClient* client, NetClientEvent* event);

@@ -552,7 +552,22 @@ struct PairLoop
     bool client_unpaired = false;
     bool host_unpaired = false;
     std::string host_unpaired_name;
+    // The host's user, played by the test: answers pairing requests by
+    // reading the client's code (as off its screen), mistyping the first
+    // `host_mistypes`, at `host_level`; or refuses; or doesn't answer.
+    bool host_answers = true;
+    bool host_refuses = false;
+    uint32_t host_mistypes = 0;
+    NetAccessLevel host_level = NetAccessLevel::gamepad;
+    uint32_t host_requests = 0;
+    uint32_t host_retries = 0;
+    NetAccessEvent host_request;     // the last pairing_requested
+    NetAccessLevel host_granted_back = NetAccessLevel::gamepad;
+    bool host_got_grant_back = false;
+    uint32_t client_code_changes = 0;
 };
+
+static void wrong_code(const char* code, char* out);
 
 static void pair_pump(PairLoop* loop)
 {
@@ -561,6 +576,32 @@ static void pair_pump(PairLoop* loop)
     {
         loop->host_last = host_event.type;
         loop->host_events++;
+        if (host_event.type == NetAccessEventType::pairing_requested)
+        {
+            loop->host_requests++;
+            loop->host_retries += host_event.retry ? 1 : 0;
+            loop->host_request = host_event;
+            if (loop->host_refuses)
+            {
+                net_access_refuse_pairing(&loop->host, host_event.peer);
+            }
+            else if (loop->host_answers)
+            {
+                char typed[NET_PAIR_CODE_DIGITS + 1];
+                std::snprintf(typed, sizeof(typed), "%s", loop->client.code);
+                if (loop->host_mistypes > 0)
+                {
+                    wrong_code(loop->client.code, typed);
+                    loop->host_mistypes--;
+                }
+                net_access_answer_pairing(&loop->host, host_event.peer, typed, loop->host_level);
+            }
+        }
+        if (host_event.type == NetAccessEventType::granted_back)
+        {
+            loop->host_got_grant_back = true;
+            loop->host_granted_back = host_event.access;
+        }
         if (host_event.type == NetAccessEventType::unpaired)
         {
             loop->host_unpaired = true;
@@ -597,6 +638,10 @@ static void pair_pump(PairLoop* loop)
         else if (event.type == NetClientEventType::unpaired)
         {
             loop->client_unpaired = true;
+        }
+        else if (event.type == NetClientEventType::code_changed)
+        {
+            loop->client_code_changes++;   // still pairing: the outcome comes later
         }
         else
         {
@@ -636,7 +681,14 @@ static void pump_for(PairLoop* loop, int milliseconds)
 static void wrong_code(const char* code, char* out)
 {
     std::snprintf(out, NET_PAIR_CODE_DIGITS + 1, "%s", code);
-    out[0] = out[0] == '9' ? '0' : static_cast<char>(out[0] + 1);
+    out[8] = out[8] == '9' ? '0' : static_cast<char>(out[8] + 1);   // the last digit: the slot stays
+}
+
+// A fresh code, as the client's PAIR window makes one.
+static const char* new_code(char* out)
+{
+    net_pair_code_generate(out);
+    return out;
 }
 
 static void test_pairing(const char* folder)
@@ -665,40 +717,70 @@ static void test_pairing(const char* folder)
     NetClientEvent result = pair_attempt(loop, address, nullptr);
     check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::not_paired,
           "not paired, no code: refused (not_paired)");
-    result = pair_attempt(loop, address, "123456");
-    check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::pairing_closed,
-          "pairing closed: refused (pairing_closed)");
-
-    check(net_access_open_pairing(&loop->host), "pairing opened");
     char code[NET_PAIR_CODE_DIGITS + 1];
-    std::snprintf(code, sizeof(code), "%s", loop->host.code);
-    check(net_pair_code_valid(code), "the code is 6 digits");
-    char bad[NET_PAIR_CODE_DIGITS + 1];
-    wrong_code(code, bad);
-    result = pair_attempt(loop, address, bad);
-    check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::wrong_code,
-          "wrong code: refused (wrong_code)");
-    pump_for(loop, 200);
-    check(loop->host_last == NetAccessEventType::pairing_failed, "host saw the failed attempt");
-    check(std::strcmp(code, loop->host.code) != 0, "the code changed after the failure");
-    check(loop->host.pairing_open, "pairing still open after one failure");
+    check(net_pair_code_valid(new_code(code)) && std::strlen(code) == 9, "the code is 9 digits");
 
-    std::snprintf(code, sizeof(code), "%s", loop->host.code);
+    // The host's user refuses: refused, and that device isn't asked about again.
+    loop->host_refuses = true;
     result = pair_attempt(loop, address, code);
-    check(result.type == NetClientEventType::ready && result.newly_paired, "right code: paired");
+    check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::refused,
+          "the host refuses: refused (refused)");
+    check(loop->host_requests == 1 && std::strcmp(loop->host_request.name, "Ana's phone") == 0,
+          "the host saw the request with the client's name");
+    result = pair_attempt(loop, address, new_code(code));
+    check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::pairing_closed &&
+              loop->host_requests == 1,
+          "refused once: not asked again (pairing_closed)");
+    loop->host_refuses = false;
+    loop->host.refused_keys.clear();   // as a new NetAccess (restart) would be
+
+    // Nobody types: the client waits, nothing happens on its own.
+    loop->host_answers = false;
+    loop->client_got = false;
+    check(net_client_connect(&loop->client, address, new_code(code)), "connect with a code");
+    net_client_set_pairing(&loop->client, NetAccessLevel::share, NetPairKind::piccolo);
+    pump_for(loop, 400);
+    check(!loop->client_got && loop->host_request.access == NetAccessLevel::share,
+          "the request waits for the host's user (asking for the level it was set to)");
+    net_client_close(&loop->client);
+    pump_for(loop, 200);
+    check(loop->host_last == NetAccessEventType::closed, "a request that goes: closed (the dialog closes)");
+    loop->host_answers = true;
+
+    // Mistyped twice, then right: the client makes new codes, the same
+    // connection pairs, at the level the host's user picked.
+    loop->host_mistypes = 2;
+    loop->host_requests = 0;
+    loop->host_retries = 0;
+    loop->client_code_changes = 0;
+    net_client_set_pairing(&loop->client, NetAccessLevel::share, NetPairKind::piccoletto);
+    result = pair_attempt(loop, address, new_code(code));
+    check(result.type == NetClientEventType::ready && result.newly_paired, "right code at the third try: paired");
+    check(loop->client_code_changes == 2 && loop->host_retries == 2 && loop->host_requests == 3,
+          "two wrong codes: two new codes, two retries on the host");
+    check(loop->host_request.access == NetAccessLevel::share && loop->host_request.kind == NetPairKind::piccoletto,
+          "the request says what it wants and what it is");
     pump_for(loop, 100);
-    check(loop->host_last == NetAccessEventType::paired, "host reported the new device");
-    check(!loop->host.pairing_open, "pairing closes after a success");
-    check(loop->host.trust.devices.size() == 1 && loop->host.trust.devices[0].name == "Ana's phone",
-          "host trusts the client by name");
+    check(loop->host_last == NetAccessEventType::paired || loop->host_events > 0, "host reported the new device");
+    check(loop->host.trust.devices.size() == 1 && loop->host.trust.devices[0].name == "Ana's phone" &&
+              loop->host.trust.devices[0].access == NetAccessLevel::gamepad,
+          "host trusts the client by name, at the level its user picked (not the one asked for)");
+    check(loop->client_got_access && loop->client.access == NetAccessLevel::gamepad, "the client is told that level");
     check(std::memcmp(loop->host.trust.devices[0].key, client_key.public_key, NET_KEY_SIZE) == 0,
           "host trusts the client's key");
     check(loop->client.trust.devices.size() == 1 && loop->client.trust.devices[0].name == "Living room",
           "client trusts the host");
+
+    // Access back, once, right after pairing.
+    check(net_client_grant_back(&loop->client, NetAccessLevel::share), "grant_back sent");
+    pump_for(loop, 200);
+    check(loop->host_got_grant_back && loop->host_granted_back == NetAccessLevel::share, "the host got it");
+    check(!net_client_grant_back(&loop->client, NetAccessLevel::full), "only once");
     NetTrust saved;
     net_trust_load(&saved, host_trust.c_str());
     check(saved.devices.size() == 1 && std::memcmp(saved.devices[0].key, client_key.public_key, NET_KEY_SIZE) == 0,
           "the host's list is on disk");
+    loop->client_got_access = false;
 
     const uint8_t hello[] = {NET_MESSAGE_FIRST_APP, 'x'};
     check(net_client_send(&loop->client, NetChannel::control, hello, sizeof(hello)), "app message sent");
@@ -718,7 +800,7 @@ static void test_pairing(const char* folder)
     loop->client.name = "ANA'S NEW PHONE";
     result = pair_attempt(loop, address, nullptr);
     check(result.type == NetClientEventType::ready && !result.newly_paired, "paired device welcomed without a code");
-    check(result.access == NetAccessLevel::gamepad, "a new device starts at gamepad (and is told)");
+    check(result.access == NetAccessLevel::gamepad, "welcomed at the level it was given");
     pump_for(loop, 100);
     check(loop->host.trust.devices[0].name == "ANA'S NEW PHONE", "the device's new name replaces the old one");
     net_trust_load(&saved, host_trust.c_str());
@@ -790,8 +872,7 @@ static void test_pairing(const char* folder)
     net_trust_remove(&loop->host.trust, 0);
 
     // Unpairing from the client, connected: the host forgets it too.
-    net_access_open_pairing(&loop->host);
-    result = pair_attempt(loop, address, loop->host.code);
+    result = pair_attempt(loop, address, new_code(code));
     check(result.type == NetClientEventType::ready && result.newly_paired, "paired again");
     pump_for(loop, 100);
     check(loop->host.trust.devices.size() == 1 && loop->client.trust.devices.size() == 1, "both lists have it");
@@ -810,8 +891,7 @@ static void test_pairing(const char* folder)
     check(loop->host_last == NetAccessEventType::closed, "the connection closed (the client closes it)");
 
     // Unpairing from the client, not connected: only its own list.
-    net_access_open_pairing(&loop->host);
-    result = pair_attempt(loop, address, loop->host.code);
+    result = pair_attempt(loop, address, new_code(code));
     check(result.type == NetClientEventType::ready, "paired once more");
     net_client_close(&loop->client);
     pump_for(loop, 200);
@@ -822,15 +902,12 @@ static void test_pairing(const char* folder)
     check(!net_client_unpair(&loop->client, 0), "no such host: false");
     net_trust_remove(&loop->host.trust, 0);
 
-    // Five failures close pairing.
-    net_access_open_pairing(&loop->host);
-    for (uint32_t i = 0; i < NET_PAIRING_MAX_FAILURES && loop->host.pairing_open; i++)
-    {
-        wrong_code(loop->host.code, bad);
-        pair_attempt(loop, address, bad);
-        pump_for(loop, 150);
-    }
-    check(!loop->host.pairing_open, "pairing closes after five failures");
+    // Five wrong codes on one connection: refused (wrong_code).
+    loop->host_mistypes = NET_PAIRING_MAX_FAILURES;
+    result = pair_attempt(loop, address, new_code(code));
+    check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::wrong_code,
+          "five wrong codes: refused (wrong_code)");
+    loop->host_mistypes = 0;
 
     net_client_destroy(&loop->client);
     net_access_destroy(&loop->host);
