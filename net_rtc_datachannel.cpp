@@ -557,6 +557,15 @@ NetRtcSocket* net_rtc_socket_open(const char* url)
     config.protocolsCount = 1;
     config.connectionTimeoutMs = 8000;
     config.maxMessageSize = static_cast<int>(BEACON_SIGNALING_MAX_SIZE);
+#if MULTITAP_NET_RTC_MBEDTLS
+    // With Mbed TLS (Android) libdatachannel checks a wss certificate only
+    // against a CA bundle handed to it, which its C API can't take, and
+    // Android's own store isn't one: without this every wss fails. Andrés,
+    // 2026-11-21: no check on Android. What crosses this socket is sealed end
+    // to end with the pairing keys and the beacon is untrusted by design;
+    // someone in the middle sees room ids and can drop messages, no more.
+    config.disableTlsVerification = true;
+#endif
     socket->ws = rtcCreateWebSocketEx(url, &config);
     if (socket->ws < 0)
     {
