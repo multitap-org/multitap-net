@@ -87,11 +87,29 @@ enum class NetTransport : uint8_t
 };
 
 // A peer number as everything above NetHost sees it, and what it is below.
+// WebRTC peers have no ENet underneath to say goodbye or measure the round
+// trip, so NetHost does both itself with small frames of its own on the
+// input channel (net_host.cpp: "NetHost's own frames"). ENet peers don't
+// need them.
+constexpr double   NET_HOST_PING_SECONDS = 0.5;    // a ping to each WebRTC peer this often
+constexpr uint32_t NET_HOST_PING_WINDOW = 8;       // loss: pongs missing out of the last this many pings
+constexpr double   NET_HOST_BYE_SECONDS = 0.1;     // a closing WebRTC peer: closed this long after its bye
+
 struct NetHostSlot
 {
     bool         used = false;
     NetTransport transport = NetTransport::enet;
     uint32_t     index = 0;   // the backend's peer number
+    // WebRTC only (NetHost's own frames):
+    double       closing_at = -1.0;     // bye sent: closed then (-1 = not closing)
+    double       next_ping = 0.0;
+    uint32_t     ping_seq = 0;          // the last ping's number
+    uint32_t     window_pings = 0;      // pings and pongs in the current loss window
+    uint32_t     window_pongs = 0;
+    uint32_t     pongs = 0;             // pongs ever (0 = no round trip known yet)
+    float        round_trip_ms = 0.0f;  // smoothed like ENet's (1/8 per sample)
+    float        jitter_ms = 0.0f;      // its mean deviation (1/4 per sample)
+    float        loss = 0.0f;           // of the last full window, 0..1
 };
 
 struct NetEvent
@@ -125,6 +143,7 @@ struct NetHost
     uint32_t    rtc_slot[NET_MAX_PEERS];    // WebRTC peer -> slot (NET_NO_PEER)
     NetRtc*     rtc = nullptr;              // WebRTC, once net_host_enable_rtc
     bool        files_refused_logged = false;   // a peer without the `files` channel (logged once)
+    uint32_t    rtc_byes_received = 0;      // WebRTC peers that said goodbye (counted for the tests)
 };
 
 // ENet's global setup (WSAStartup on Windows). Counted: each successful

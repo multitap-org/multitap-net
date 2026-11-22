@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <random>
+#include <thread>
 
 #include <enet.h>
 
@@ -285,8 +286,29 @@ bool net_host_create_client(NetHost* host)
     return true;
 }
 
+static void send_host_frame(NetHost* host, uint32_t index, uint8_t type, uint32_t seq, uint32_t time_ms);
+constexpr uint8_t HOST_FRAME_BYE = 1;   // (NetHost's own frames: see poll_rtc)
+
 void net_host_destroy(NetHost* host)
 {
+    // WebRTC peers still connected get a bye, and a moment for it to leave
+    // (the backends send on their own threads): otherwise they'd notice only
+    // after their timeouts (a browser: ~15 s).
+    bool said_bye = false;
+    for (uint32_t i = 0; i < NET_MAX_PEERS && host->rtc != nullptr; i++)
+    {
+        const NetHostSlot* slot = &host->slots[i];
+        if (slot->used && slot->transport == NetTransport::rtc && net_rtc_connected(host->rtc, slot->index))
+        {
+            send_host_frame(host, slot->index, HOST_FRAME_BYE, 0, 0);
+            send_host_frame(host, slot->index, HOST_FRAME_BYE, 0, 0);
+            said_bye = true;
+        }
+    }
+    if (said_bye)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     net_rtc_destroy(host->rtc);
     host->rtc = nullptr;
     if (host->held_packet != nullptr)
@@ -359,6 +381,127 @@ static double net_host_clock()
     return std::chrono::duration<double>(since).count();
 }
 
+// NetHost's own frames, WebRTC peers only, on the input channel (16 bytes):
+//   'M' 'T' 'H' type | 0 0 0 0 | seq u32 | time_ms u32   (little-endian)
+//   type 1 bye   the sender is closing: close at once (it may not arrive:
+//                sent twice, unreliable; the 10-15 s timeouts stay the rest)
+//   type 2 ping  answered by a pong with the same seq and time
+//   type 3 pong
+// net_link's input packets start with their nonce (8 bytes little-endian)
+// whose top bit is always set (NET_LINK_INPUT_NONCE_BIT), so byte 7 of
+// theirs is >= 0x80; ours is 0: the two can't be mistaken for each other.
+// libdatachannel's close doesn't reach a browser as a channel close (it
+// noticed a vanished host only after ~15 s) and its C API has no round
+// trip: hence these.
+constexpr size_t  HOST_FRAME_SIZE = 16;
+constexpr uint8_t HOST_FRAME_PING = 2;
+constexpr uint8_t HOST_FRAME_PONG = 3;
+
+static void put_u32(uint8_t* out, uint32_t value)
+{
+    out[0] = static_cast<uint8_t>(value);
+    out[1] = static_cast<uint8_t>(value >> 8);
+    out[2] = static_cast<uint8_t>(value >> 16);
+    out[3] = static_cast<uint8_t>(value >> 24);
+}
+
+static uint32_t get_u32(const uint8_t* in)
+{
+    return static_cast<uint32_t>(in[0]) | (static_cast<uint32_t>(in[1]) << 8) | (static_cast<uint32_t>(in[2]) << 16) |
+           (static_cast<uint32_t>(in[3]) << 24);
+}
+
+static uint32_t clock_ms(double now)
+{
+    return static_cast<uint32_t>(static_cast<uint64_t>(now * 1000.0) & 0xFFFFFFFFu);
+}
+
+static void send_host_frame(NetHost* host, uint32_t index, uint8_t type, uint32_t seq, uint32_t time_ms)
+{
+    uint8_t frame[HOST_FRAME_SIZE] = {'M', 'T', 'H', type};
+    put_u32(&frame[8], seq);
+    put_u32(&frame[12], time_ms);
+    net_rtc_send(host->rtc, index, NetChannel::input, frame, sizeof(frame));
+}
+
+// True when `data` is one of NetHost's frames (handled here, never passed up).
+static bool take_host_frame(NetHost* host, uint32_t slot, const uint8_t* data, size_t size, double now)
+{
+    if (size != HOST_FRAME_SIZE || data[0] != 'M' || data[1] != 'T' || data[2] != 'H' || data[4] != 0 ||
+        data[5] != 0 || data[6] != 0 || data[7] != 0)
+    {
+        return false;
+    }
+    NetHostSlot* peer = &host->slots[slot];
+    uint32_t seq = get_u32(&data[8]);
+    uint32_t time_ms = get_u32(&data[12]);
+    if (data[3] == HOST_FRAME_BYE)
+    {
+        host->rtc_byes_received++;
+        net_rtc_close(host->rtc, peer->index);   // `disconnected` follows
+    }
+    else if (data[3] == HOST_FRAME_PING)
+    {
+        send_host_frame(host, peer->index, HOST_FRAME_PONG, seq, time_ms);
+    }
+    else if (data[3] == HOST_FRAME_PONG && seq == peer->ping_seq)
+    {
+        // Only the latest ping's pong counts (an old one would be a late
+        // sample, and it was already missing from its window).
+        float sample = static_cast<float>(clock_ms(now) - time_ms);
+        if (peer->pongs == 0)
+        {
+            peer->round_trip_ms = sample;
+            peer->jitter_ms = sample / 2.0f;
+        }
+        else
+        {
+            float deviation = sample > peer->round_trip_ms ? sample - peer->round_trip_ms : peer->round_trip_ms - sample;
+            peer->round_trip_ms += (sample - peer->round_trip_ms) / 8.0f;
+            peer->jitter_ms += (deviation - peer->jitter_ms) / 4.0f;
+        }
+        peer->pongs++;
+        peer->window_pongs++;
+    }
+    return true;
+}
+
+// Pings, and the closes whose bye has had its time.
+static void tend_rtc_peers(NetHost* host, double now)
+{
+    for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
+    {
+        NetHostSlot* peer = &host->slots[i];
+        if (!peer->used || peer->transport != NetTransport::rtc)
+        {
+            continue;
+        }
+        if (peer->closing_at >= 0.0)
+        {
+            if (now >= peer->closing_at)
+            {
+                peer->closing_at = -1.0;
+                net_rtc_close(host->rtc, peer->index);   // `disconnected` follows
+            }
+            continue;
+        }
+        if (now < peer->next_ping || !net_rtc_connected(host->rtc, peer->index))
+        {
+            continue;
+        }
+        if (peer->window_pings == NET_HOST_PING_WINDOW)
+        {
+            peer->loss = 1.0f - static_cast<float>(peer->window_pongs) / static_cast<float>(NET_HOST_PING_WINDOW);
+            peer->window_pings = 0;
+            peer->window_pongs = 0;
+        }
+        peer->ping_seq++;
+        peer->window_pings++;
+        peer->next_ping = now + NET_HOST_PING_SECONDS;
+        send_host_frame(host, peer->index, HOST_FRAME_PING, peer->ping_seq, clock_ms(now));
+    }
+}
+
 // WebRTC's events, after ENet's (nothing when it isn't enabled).
 static bool poll_rtc(NetHost* host, NetEvent* event)
 {
@@ -366,8 +509,10 @@ static bool poll_rtc(NetHost* host, NetEvent* event)
     {
         return false;
     }
+    double now = net_host_clock();
+    tend_rtc_peers(host, now);
     NetRtcEvent rtc_event;
-    while (net_rtc_poll(host->rtc, &rtc_event, net_host_clock()))
+    while (net_rtc_poll(host->rtc, &rtc_event, now))
     {
         uint32_t slot = host->rtc_slot[rtc_event.index];
         if (slot == NET_NO_PEER)
@@ -387,6 +532,10 @@ static bool poll_rtc(NetHost* host, NetEvent* event)
             event->type = NetEventType::disconnected;
             return true;
         case NetRtcEventType::received:
+            if (rtc_event.channel == NetChannel::input && take_host_frame(host, slot, rtc_event.data, rtc_event.size, now))
+            {
+                continue;
+            }
             event->type = NetEventType::received;
             event->channel = rtc_event.channel;
             event->data = rtc_event.data;
@@ -644,9 +793,14 @@ bool net_host_peer_stats(const NetHost* host, uint32_t peer, NetLinkStats* stats
 {
     if (is_rtc(host, peer))
     {
-        // libdatachannel's C API has no round trip: shown as 0 (unknown) for now.
+        // NetHost's own pings (libdatachannel's C API and the browser's
+        // channels give no round trip): 0 until the first pong.
+        const NetHostSlot* slot = &host->slots[peer];
         *stats = {};
-        return net_rtc_connected(host->rtc, host->slots[peer].index);
+        stats->round_trip_ms = static_cast<uint32_t>(slot->round_trip_ms + 0.5f);
+        stats->jitter_ms = static_cast<uint32_t>(slot->jitter_ms + 0.5f);
+        stats->loss = slot->loss;
+        return net_rtc_connected(host->rtc, slot->index);
     }
     const ENetPeer* enet_peer = enet_peer_of(host, peer);
     if (enet_peer == nullptr || enet_peer->state != ENET_PEER_STATE_CONNECTED)
@@ -674,7 +828,16 @@ void net_host_disconnect(NetHost* host, uint32_t peer)
 {
     if (is_rtc(host, peer))
     {
-        net_rtc_close(host->rtc, host->slots[peer].index);
+        // The other side learns at once (a bye, twice: it's unreliable),
+        // then the channels close once it had time to leave.
+        NetHostSlot* slot = &host->slots[peer];
+        if (slot->closing_at < 0.0)
+        {
+            double now = net_host_clock();
+            send_host_frame(host, slot->index, HOST_FRAME_BYE, 0, clock_ms(now));
+            send_host_frame(host, slot->index, HOST_FRAME_BYE, 0, clock_ms(now));
+            slot->closing_at = now + NET_HOST_BYE_SECONDS;
+        }
         return;
     }
     ENetPeer* enet_peer = enet_peer_of(host, peer);
