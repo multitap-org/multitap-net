@@ -129,6 +129,9 @@ bool net_share_link_grant_back(NetShareLink* link, NetAccessLevel level);
 // A host we may connect to now (a device that paired with us granted it back,
 // NetAccessEventType::granted_back): added to our hosts list and saved.
 bool net_share_link_add_host(NetShareLink* link, const uint8_t* key, const char* name);
+// Forgets the host at `device` (the status' `paired` index): net_client_unpair
+// (told if we're connected to it now, else only here). Saved at once.
+bool net_share_link_forget_host(NetShareLink* link, uint32_t device);
 
 void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status);
 

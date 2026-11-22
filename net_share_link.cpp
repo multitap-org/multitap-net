@@ -486,3 +486,9 @@ bool net_share_link_add_host(NetShareLink* link, const uint8_t* key, const char*
     net_trust_add(&link->client.trust, key, name);
     return net_trust_save(&link->client.trust, link->client.trust_path.c_str());
 }
+
+bool net_share_link_forget_host(NetShareLink* link, uint32_t device)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    return link->running && net_client_unpair(&link->client, device);
+}
