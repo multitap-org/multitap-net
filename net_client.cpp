@@ -27,6 +27,7 @@ static void forget_secrets(NetClient* client)
     client->has_code = false;
     client->failures = 0;
     client->just_paired = false;
+    client->welcome_pending = false;
 }
 
 void net_client_set_pairing(NetClient* client, NetAccessLevel want, NetPairKind kind)
@@ -429,6 +430,23 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
     }
     else if (client->state == NetClientState::pairing || client->state == NetClientState::confirming)
     {
+        // Paired: the host's welcome right after its result says the level
+        // its user picked (Andrés, 2026-11-22: given STREAM, the phone kept
+        // GAMEPAD, the level it had asked for, since it closed before this).
+        char host_name[NET_DEVICE_NAME_MAX + 1];
+        NetAccessLevel level = NetAccessLevel::gamepad;
+        if (client->welcome_pending && net_message_read_welcome(data, size, &level, host_name))
+        {
+            client->welcome_pending = false;
+            client->access = level;
+            client->state = NetClientState::ready;
+            client->just_paired = true;
+            event->type = NetClientEventType::ready;
+            event->newly_paired = true;
+            event->access = level;
+            event->device = client->device;
+            return;
+        }
         bool ok = false;
         if (net_message_read_pair_result(data, size, &ok) && ok && client->state == NetClientState::confirming)
         {
@@ -439,13 +457,7 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
             }
             forget_secrets(client);
             client->device = static_cast<int32_t>(device);
-            client->access = client->want;   // until the welcome that follows says what the host gave
-            client->state = NetClientState::ready;
-            client->just_paired = true;
-            event->type = NetClientEventType::ready;
-            event->newly_paired = true;
-            event->access = client->access;
-            event->device = client->device;
+            client->welcome_pending = true;   // `ready` once the welcome says our level (just after)
             return;
         }
         refuse(client, NetClientRefusal::refused, false, event);   // the host closes after a refused result

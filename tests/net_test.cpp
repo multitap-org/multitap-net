@@ -780,6 +780,8 @@ static void test_pairing(const char* folder)
     net_client_set_pairing(&loop->client, NetAccessLevel::share, NetPairKind::piccoletto);
     result = pair_attempt(loop, address, new_code(code));
     check(result.type == NetClientEventType::ready && result.newly_paired, "right code at the third try: paired");
+    check(result.access == NetAccessLevel::gamepad && loop->client.access == NetAccessLevel::gamepad,
+          "paired at the level the host's user picked, not the one asked for (share)");
     check(loop->client_code_changes == 2 && loop->host_retries == 2 && loop->host_requests == 3,
           "two wrong codes: two new codes, two retries on the host");
     check(loop->host_request.access == NetAccessLevel::share && loop->host_request.kind == NetPairKind::piccoletto,
@@ -789,7 +791,8 @@ static void test_pairing(const char* folder)
     check(loop->host.trust.devices.size() == 1 && loop->host.trust.devices[0].name == "Ana's phone" &&
               loop->host.trust.devices[0].access == NetAccessLevel::gamepad,
           "host trusts the client by name, at the level its user picked (not the one asked for)");
-    check(loop->client_got_access && loop->client.access == NetAccessLevel::gamepad, "the client is told that level");
+    check(!loop->client_got_access && loop->client.access == NetAccessLevel::gamepad,
+          "the client is told that level when paired (no separate access event)");
     check(std::memcmp(loop->host.trust.devices[0].key, client_key.public_key, NET_KEY_SIZE) == 0,
           "host trusts the client's key");
     check(loop->client.trust.devices.size() == 1 && loop->client.trust.devices[0].name == "Living room",
@@ -895,9 +898,14 @@ static void test_pairing(const char* folder)
           "unknown host refused");
     net_trust_remove(&loop->host.trust, 0);
 
-    // Unpairing from the client, connected: the host forgets it too.
+    // Unpairing from the client, connected: the host forgets it too. (Paired
+    // at STREAM while asking for GAMEPAD: the ready event says STREAM.)
+    loop->host_level = NetAccessLevel::stream;
+    net_client_set_pairing(&loop->client, NetAccessLevel::gamepad, NetPairKind::piccoletto);
     result = pair_attempt(loop, address, new_code(code));
     check(result.type == NetClientEventType::ready && result.newly_paired, "paired again");
+    check(result.access == NetAccessLevel::stream, "given STREAM, asked for GAMEPAD: STREAM when paired");
+    loop->host_level = NetAccessLevel::gamepad;
     pump_for(loop, 100);
     check(loop->host.trust.devices.size() == 1 && loop->client.trust.devices.size() == 1, "both lists have it");
     loop->client_closed = false;

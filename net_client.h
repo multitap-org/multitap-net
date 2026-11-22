@@ -85,6 +85,7 @@ struct NetClient
     NetAccessLevel want = NetAccessLevel::gamepad;   // the level we ask for (net_client_set_pairing)
     NetPairKind  kind = NetPairKind::piccolo;
     bool           just_paired = false;  // may grant_back on this connection
+    bool           welcome_pending = false;   // paired (pair_result ok): `ready` waits for the welcome with our level
     char           code[NET_PAIR_CODE_DIGITS + 1] = {};
     uint8_t        host_key[NET_KEY_SIZE] = {};
     uint8_t        handshake_hash[NET_HASH_SIZE] = {};
