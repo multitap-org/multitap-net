@@ -23,3 +23,12 @@ the normal tests when libdatachannel is there):
 
 Then open the page with `&mode=client`. The page meets that host through
 the beacon, the phone ↔ browser case. Both sides use fixed test keys.
+
+**Native ↔ browser** (the other way): open the page with `&mode=host`
+first (it waits 60 s for its client), then run
+
+    frontend_net_web_host ws://127.0.0.1:47432/signal client <scratch folder> 127.0.0.1:47430
+
+The native client tries UDP through the beacon first, as piccolo does. The
+page only signals, so the client falls back to WebRTC. Both print "all
+checks passed" (the page's title becomes PASS).
