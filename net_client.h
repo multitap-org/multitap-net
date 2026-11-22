@@ -95,6 +95,7 @@ struct NetClient
     std::string    signal_url;           // "" = no signaling (net_client_set_signal)
     std::string    signal_stun;
     bool           via_signal = false;   // this connection is WebRTC, signaled by the beacon
+    bool           udp_host_offline = false;   // the beacon said so over UDP before WebRTC was tried
     uint8_t        meet_key[NET_KEY_SIZE] = {};   // the host being met through the beacon
     bool           meet_pairing = false; // met in its pairing room (net_client_pair_beacon)
     bool           expect_key = false;   // the host must turn out to have meet_key

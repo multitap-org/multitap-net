@@ -96,6 +96,7 @@ static bool start_signal(NetClient* client)
 static bool start_meeting(NetClient* client, const NetAddress* servers, uint32_t count, const BeaconId* id)
 {
     client->via_signal = false;
+    client->udp_host_offline = false;
     client->peer = NET_NO_PEER;
     client->via_beacon = true;   // the beacon either way: UDP or its signaling
     if (count > 0 && net_beacon_client_start(&client->beacon, servers, count, id, net_seconds()))
@@ -162,9 +163,11 @@ static bool signal_step(NetClient* client, NetClientEvent* event)
     }
     if (client->signal.failure != NetSignalFailure::none)
     {
-        refuse(client, client->signal.failure == NetSignalFailure::host_offline ? NetClientRefusal::host_offline
-                                                                                 : NetClientRefusal::beacon_unreachable,
-               false, event);
+        // A beacon that already said "not there" over UDP but whose signaling
+        // can't be reached (one without it): the host is still offline, the
+        // beacon did answer.
+        bool offline = client->signal.failure == NetSignalFailure::host_offline || client->udp_host_offline;
+        refuse(client, offline ? NetClientRefusal::host_offline : NetClientRefusal::beacon_unreachable, false, event);
         return true;
     }
     uint32_t peer = net_signal_client_peer(&client->signal);
@@ -191,6 +194,7 @@ static bool beacon_step(NetClient* client, NetClientEvent* event)
     }
     if (client->beacon.state == NetBeaconMeetState::failed)
     {
+        client->udp_host_offline = client->beacon.failure == NetBeaconFailure::host_offline;
         if (start_signal(client))
         {
             net_beacon_client_stop(&client->beacon);   // UDP gave up: WebRTC now
