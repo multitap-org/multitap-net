@@ -52,9 +52,12 @@ struct NetShareLinkStatus
     bool              waiting_host = false;   // pairing: the host has our request, its user hasn't typed yet
     std::vector<NetShareLinkFound> found;   // piccolos on the LAN, newest first
     std::vector<std::string> paired;        // the piccolos we paired with (net_share_link_connect_paired's index)
+    std::vector<uint8_t>     paired_online; // per `paired`: on the beacon now (1) or not (0); empty = unknown
     bool              newly_paired = false;   // ready: paired on this connection (access back may follow)
     uint8_t           host_key[NET_KEY_SIZE] = {};   // ready: the host's key
 };
+
+constexpr double NET_SHARE_LINK_PRESENCE_SECONDS = 20.0;
 
 struct NetShareLink
 {
@@ -89,6 +92,12 @@ struct NetShareLink
     NetAddress  servers[NET_BEACON_MAX_SERVERS];
     uint32_t    server_count = 0;
     std::string beacon;                 // the frontend's beacon setting (net_share_link_set_beacon)
+    // Presence: the paired hosts online across the internet, asked every
+    // NET_SHARE_LINK_PRESENCE_SECONDS through `beacon` (its own lookup).
+    std::string presence_name;
+    NetAddress  presence_servers[NET_BEACON_MAX_SERVERS];
+    uint32_t    presence_count = 0;
+    double      presence_next = 0.0;
 
     NetShareLinkState state = NetShareLinkState::off;
     NetClientRefusal  refusal = NetClientRefusal::none;

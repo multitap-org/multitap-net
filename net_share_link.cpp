@@ -203,8 +203,28 @@ static void run(NetShareLink* link)
                 link->resolved = true;
             }
         }
+        double now = seconds_now();
+        if (!link->beacon.empty() && now >= link->presence_next)
+        {
+            link->presence_next = now + NET_SHARE_LINK_PRESENCE_SECONDS;
+            if (link->presence_name != link->beacon)
+            {
+                std::string name = link->beacon;   // looked up without the lock (DNS blocks)
+                link->lock.unlock();
+                NetAddress servers[NET_BEACON_MAX_SERVERS];
+                uint32_t count = net_address_resolve(name.c_str(), NET_BEACON_DEFAULT_PORT, servers);
+                link->lock.lock();
+                link->presence_name = name;
+                link->presence_count = count;
+                for (uint32_t i = 0; i < count; i++)
+                {
+                    link->presence_servers[i] = servers[i];
+                }
+            }
+            net_client_ask_presence(&link->client, link->presence_servers, link->presence_count);
+        }
         poll_client(link);
-        discover(link, seconds_now());
+        discover(link, now);
         link->lock.unlock();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -408,6 +428,10 @@ void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status)
     }
     status->waiting_host = pairing && (link->client.state == NetClientState::pairing ||
                                        link->client.state == NetClientState::confirming);
+    status->paired_online = link->client.presence_answered &&
+                                    link->client.online.size() == link->client.trust.devices.size()
+                                ? link->client.online
+                                : std::vector<uint8_t>();
     status->found.clear();
     for (uint32_t i = 0; i < link->found_count; i++)
     {
