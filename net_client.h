@@ -85,6 +85,12 @@ struct NetClient
     NetAccessLevel want = NetAccessLevel::gamepad;   // the level we ask for (net_client_set_pairing)
     NetPairKind  kind = NetPairKind::piccolo;
     bool           just_paired = false;  // may grant_back on this connection
+    // Presence (net_client_ask_presence): per host in our list, registered on
+    // the beacon at the last answer (1) or not (0); empty = never asked.
+    std::vector<uint8_t> online;
+    std::vector<uint8_t> online_pending;   // this round's answers, OR'ed over the servers
+    uint64_t       presence_base = 0;     // the round's first nonce (one per 8 hosts)
+    bool           presence_answered = false;   // a beacon answered once (an old one never does: unknown)
     char           code[NET_PAIR_CODE_DIGITS + 1] = {};
     uint8_t        host_key[NET_KEY_SIZE] = {};
     uint8_t        handshake_hash[NET_HASH_SIZE] = {};
@@ -134,6 +140,10 @@ bool net_client_connect_beacon(NetClient* client, const NetAddress* servers, uin
 // (patient: no time limit) until the host joins it, then pair as on the LAN.
 // UDP when `count` > 0, else WebRTC through the signaling (a browser).
 bool net_client_pair_beacon(NetClient* client, const NetAddress* servers, uint32_t count, const char* code);
+// Asks the beacon which of our paired hosts are registered now (online
+// across the internet): `online` follows as the answers come in (polled with
+// net_client_poll). Any time, connected or not.
+void net_client_ask_presence(NetClient* client, const NetAddress* servers, uint32_t count);
 // The beacon's signaling (net_signal_url / net_signal_stun); "" = none.
 void net_client_set_signal(NetClient* client, const char* url, const char* stun);
 bool net_client_poll(NetClient* client, NetClientEvent* event);

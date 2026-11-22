@@ -417,6 +417,8 @@ bool net_beacon_host_receive(NetBeaconHost* beacon, NetHost* host, const BeaconM
     case BeaconType::MEET:
     case BeaconType::NOT_FOUND:
     case BeaconType::PUNCH:
+    case BeaconType::PRESENCE:
+    case BeaconType::PRESENT:
         return false;
     }
     return false;
@@ -504,7 +506,8 @@ void net_beacon_client_update(NetBeaconClient* beacon, NetHost* host, double now
 {
     if (beacon->state == NetBeaconMeetState::meeting)
     {
-        if (!beacon->patient && now - beacon->started > NET_BEACON_MEET_SECONDS)
+        double limit = beacon->patient ? NET_BEACON_PATIENT_SECONDS : NET_BEACON_MEET_SECONDS;
+        if (now - beacon->started > limit)
         {
             beacon->state = NetBeaconMeetState::failed;
             beacon->failure = beacon->not_found > 0 ? NetBeaconFailure::host_offline : NetBeaconFailure::unreachable;
@@ -615,4 +618,27 @@ bool net_beacon_client_receive(NetBeaconClient* beacon, NetHost* host, const Bea
         return true;
     }
     return false;
+}
+
+bool net_beacon_ask_presence(NetHost* host, const NetAddress* servers, uint32_t count, const BeaconId* ids,
+                             uint32_t id_count, uint64_t nonce)
+{
+    if (id_count < 1 || id_count > BEACON_MAX_IDS)
+    {
+        return false;
+    }
+    BeaconMessage message;
+    message.type = BeaconType::PRESENCE;
+    message.nonce = nonce;
+    message.id_count = static_cast<uint8_t>(id_count);
+    for (uint32_t i = 0; i < id_count; i++)
+    {
+        message.ids[i] = ids[i];
+    }
+    bool sent = false;
+    for (uint32_t i = 0; i < count; i++)
+    {
+        sent = send_message(host, servers[i], &message) || sent;
+    }
+    return sent;
 }
