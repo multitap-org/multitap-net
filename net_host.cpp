@@ -239,7 +239,10 @@ static bool host_create(NetHost* host, const ENetAddress* bind_address)
     {
         return true;   // the browser: no UDP, WebRTC peers only (no discovery, no ENet)
     }
-    host->enet = enet_host_create(bind_address, NET_MAX_PEERS, NET_CHANNEL_COUNT, 0, 0);
+    ENetAddress any_address = {};
+    any_address.host = ENET_HOST_ANY;
+    any_address.port = 0;
+    host->enet = enet_host_create(bind_address != nullptr ? bind_address : &any_address, NET_MAX_PEERS, NET_CHANNEL_COUNT, 0, 0);
     if (host->enet == nullptr)
     {
         return false;
