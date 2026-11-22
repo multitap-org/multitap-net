@@ -52,10 +52,13 @@ struct NetShareLinkStatus
     bool              waiting_host = false;   // pairing: the host has our request, its user hasn't typed yet
     std::vector<NetShareLinkFound> found;   // piccolos on the LAN, newest first
     std::vector<std::string> paired;        // the piccolos we paired with (net_share_link_connect_paired's index)
+    bool              newly_paired = false;   // ready: paired on this connection (access back may follow)
+    uint8_t           host_key[NET_KEY_SIZE] = {};   // ready: the host's key
 };
 
 struct NetShareLink
 {
+    bool        newly_paired = false;   // the last ready came with newly_paired (cleared on a new connection)
     std::mutex  lock;
     std::thread thread;
     bool        running = false;
@@ -119,6 +122,13 @@ bool net_share_link_connect_paired(NetShareLink* link, uint32_t device);
 // the code's pairing room on the beacon. False if the code isn't 9 digits.
 bool net_share_link_pair_beacon(NetShareLink* link, const char* code);
 void net_share_link_disconnect(NetShareLink* link);
+// Right after pairing (status newly_paired), on that connection: lets the host
+// come to us at `level` (net_client_grant_back; once). The caller adds the
+// host to its own NetAccess (net_access_add_device) with status.host_key.
+bool net_share_link_grant_back(NetShareLink* link, NetAccessLevel level);
+// A host we may connect to now (a device that paired with us granted it back,
+// NetAccessEventType::granted_back): added to our hosts list and saved.
+bool net_share_link_add_host(NetShareLink* link, const uint8_t* key, const char* name);
 
 void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status);
 

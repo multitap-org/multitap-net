@@ -91,6 +91,7 @@ static void poll_client(NetShareLink* link)
         case NetClientEventType::ready:
             link->state = NetShareLinkState::ready;
             link->refusal = NetClientRefusal::none;
+            link->newly_paired = event.newly_paired;
             host_log(LogLevel::info, "Network: share: connected to %s", link->client.host_name);
             break;
         case NetClientEventType::refused:
@@ -305,6 +306,7 @@ bool net_share_link_connect(NetShareLink* link, NetAddress address, const char* 
     }
     // Started by the thread once the client is idle (at its next poll, or
     // once the old connection is gone).
+    link->newly_paired = false;
     link->connect_pending = true;
     link->connect_beacon = false;
     link->connect_device = -1;
@@ -387,6 +389,13 @@ void net_share_link_disconnect(NetShareLink* link)
 void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status)
 {
     std::lock_guard<std::mutex> guard(link->lock);
+    bool ready = link->state == NetShareLinkState::ready;
+    status->newly_paired = ready && link->newly_paired;
+    std::memcpy(status->host_key, link->client.host_key, NET_KEY_SIZE);
+    if (!ready)
+    {
+        std::memset(status->host_key, 0, NET_KEY_SIZE);
+    }
     status->state = link->state;
     status->refusal = link->refusal;
     status->access = link->client.access;
@@ -454,4 +463,26 @@ void net_share_link_take_done(NetShareLink* link, std::vector<NetShareClientDone
     std::lock_guard<std::mutex> guard(link->lock);
     done->clear();
     done->swap(link->share.done);
+}
+
+bool net_share_link_grant_back(NetShareLink* link, NetAccessLevel level)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    if (!link->running || !link->newly_paired)
+    {
+        return false;
+    }
+    link->newly_paired = false;   // once
+    return net_client_grant_back(&link->client, level);
+}
+
+bool net_share_link_add_host(NetShareLink* link, const uint8_t* key, const char* name)
+{
+    std::lock_guard<std::mutex> guard(link->lock);
+    if (!link->running)
+    {
+        return false;
+    }
+    net_trust_add(&link->client.trust, key, name);
+    return net_trust_save(&link->client.trust, link->client.trust_path.c_str());
 }
