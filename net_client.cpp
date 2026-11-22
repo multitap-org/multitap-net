@@ -46,8 +46,23 @@ bool net_client_grant_back(NetClient* client, NetAccessLevel level)
     return size > 0 && net_session_send(&client->session, client->peer, NetChannel::control, client->out.data(), size);
 }
 
+// A guest connection is over (or never started): our own key again.
+static void guest_done(NetClient* client)
+{
+    if (!client->guest)
+    {
+        return;
+    }
+    client->session.identity = client->home_identity;
+    net_keypair_wipe(&client->home_identity);
+    net_guest_link_wipe(&client->guest_link);
+    client->guest = false;
+}
+
 void net_client_destroy(NetClient* client)
 {
+    guest_done(client);
+    net_keypair_wipe(&client->guest_identity);
     forget_secrets(client);
     net_signal_stop(&client->signal);
     net_session_destroy(&client->session);
@@ -97,10 +112,21 @@ static bool start_signal(NetClient* client)
     }
     char slot[NET_PAIR_SLOT_DIGITS + 1] = {};
     std::memcpy(slot, client->code, NET_PAIR_SLOT_DIGITS);
-    bool started = client->meet_pairing
-                       ? net_signal_client_start_pair(&client->signal, client->signal_url.c_str(), slot, net_seconds())
-                       : net_signal_client_start(&client->signal, client->signal_url.c_str(),
-                                                 &client->session.identity, client->meet_key, net_seconds());
+    bool started = false;
+    if (client->guest)
+    {
+        started = net_signal_client_start_guest(&client->signal, client->signal_url.c_str(), &client->guest_link.meeting,
+                                                client->guest_link.signal_key, net_seconds());
+    }
+    else if (client->meet_pairing)
+    {
+        started = net_signal_client_start_pair(&client->signal, client->signal_url.c_str(), slot, net_seconds());
+    }
+    else
+    {
+        started = net_signal_client_start(&client->signal, client->signal_url.c_str(), &client->session.identity,
+                                          client->meet_key, net_seconds());
+    }
     if (!started)
     {
         return false;
@@ -170,6 +196,49 @@ bool net_client_pair_beacon(NetClient* client, const NetAddress* servers, uint32
     return true;
 }
 
+bool net_client_join_guest(NetClient* client, const NetGuestLink* link, const NetAddress* servers, uint32_t count)
+{
+    if (client->state != NetClientState::idle)
+    {
+        return false;
+    }
+    forget_secrets(client);
+    if (!client->has_guest_identity)
+    {
+        if (!net_keypair_generate(&client->guest_identity))
+        {
+            return false;
+        }
+        client->has_guest_identity = true;
+    }
+    client->home_identity = client->session.identity;
+    client->session.identity = client->guest_identity;
+    client->guest = true;
+    client->guest_link = *link;
+    client->guest_bye = NetGuestBye::none;
+    client->guest_level = NetGuestLevel::watch;
+    std::memset(client->meet_key, 0, NET_KEY_SIZE);
+    client->meet_pairing = false;
+    client->expect_key = false;
+    if (!start_meeting(client, servers, count, &link->meeting))
+    {
+        guest_done(client);
+        return false;
+    }
+    return true;
+}
+
+// A guest's refusal for a failure to meet: no host in the link's room means
+// the session ended (or the link was replaced).
+static NetClientRefusal meet_refusal(const NetClient* client, bool offline)
+{
+    if (client->guest)
+    {
+        return offline ? NetClientRefusal::guest_link : NetClientRefusal::beacon_unreachable;
+    }
+    return offline ? NetClientRefusal::host_offline : NetClientRefusal::beacon_unreachable;
+}
+
 // The signaling side of a meeting: the client's WebRTC peer once it offered,
 // or a refusal. True if `event` was filled.
 static bool signal_step(NetClient* client, NetClientEvent* event)
@@ -189,7 +258,12 @@ static bool signal_step(NetClient* client, NetClientEvent* event)
         // can't be reached (one without it): the host is still offline, the
         // beacon did answer.
         bool offline = client->signal.failure == NetSignalFailure::host_offline || client->udp_host_offline;
-        refuse(client, offline ? NetClientRefusal::host_offline : NetClientRefusal::beacon_unreachable, false, event);
+        if (client->guest && client->signal.failure == NetSignalFailure::refused)
+        {
+            refuse(client, NetClientRefusal::guest_full, false, event);   // the beacon's room was full
+            return true;
+        }
+        refuse(client, meet_refusal(client, offline), false, event);
         return true;
     }
     uint32_t peer = net_signal_client_peer(&client->signal);
@@ -222,10 +296,7 @@ static bool beacon_step(NetClient* client, NetClientEvent* event)
             net_beacon_client_stop(&client->beacon);   // UDP gave up: WebRTC now
             return false;
         }
-        NetClientRefusal refusal = client->beacon.failure == NetBeaconFailure::host_offline
-                                       ? NetClientRefusal::host_offline
-                                       : NetClientRefusal::beacon_unreachable;
-        refuse(client, refusal, false, event);
+        refuse(client, meet_refusal(client, client->beacon.failure == NetBeaconFailure::host_offline), false, event);
         return true;
     }
     if (client->beacon.state == NetBeaconMeetState::connect)
@@ -258,6 +329,8 @@ static void refuse(NetClient* client, NetClientRefusal refusal, bool we_close, N
     client->via_beacon = false;
     client->via_signal = false;
     client->state = NetClientState::idle;
+    event->guest = client->guest;
+    guest_done(client);
     event->type = NetClientEventType::refused;
     event->refusal = refusal;
 }
@@ -337,8 +410,87 @@ static void on_pair_response(NetClient* client, const uint8_t* data, size_t size
     client->state = NetClientState::confirming;
 }
 
+// Whether `mac` is the host's proof for this connection.
+static bool guest_host_mac_ok(const NetClient* client, const uint8_t* mac)
+{
+    uint8_t expected[NET_GUEST_MAC_SIZE];
+    net_guest_mac(&client->guest_link, true, client->handshake_hash, expected);
+    return crypto_verify32(mac, expected) == 0;
+}
+
+// A guest's control messages: the host proves the token (welcome, full),
+// says goodbye (bye), or sends the application's.
+static void on_guest_control(NetClient* client, const uint8_t* data, size_t size, NetClientEvent* event)
+{
+    uint8_t type = net_message_type(data, size);
+    uint8_t mac[NET_GUEST_MAC_SIZE];
+    NetGuestLevel level = NetGuestLevel::watch;
+    NetGuestBye bye = NetGuestBye::none;
+    if (net_guest_read_welcome(data, size, mac, &level))
+    {
+        if (!guest_host_mac_ok(client, mac))
+        {
+            // Not the host the link names.
+            refuse(client, NetClientRefusal::unknown_host, true, event);
+            return;
+        }
+        client->guest_level = level;
+        client->access = NetAccessLevel::stream;
+        event->guest = true;
+        event->guest_level = level;
+        event->access = NetAccessLevel::stream;
+        if (client->state == NetClientState::waiting)
+        {
+            client->state = NetClientState::ready;
+            event->type = NetClientEventType::ready;
+        }
+        else
+        {
+            event->type = NetClientEventType::access;   // the host changed the level
+        }
+        return;
+    }
+    if (client->state == NetClientState::waiting)
+    {
+        if (net_guest_read_full(data, size, mac) && guest_host_mac_ok(client, mac))
+        {
+            refuse(client, NetClientRefusal::guest_full, false, event);   // the host closes
+            return;
+        }
+        if (net_guest_read_bye(data, size, &bye))
+        {
+            refuse(client, bye == NetGuestBye::kicked ? NetClientRefusal::guest_kicked : NetClientRefusal::guest_link,
+                   false, event);
+            return;
+        }
+        // pairing_needed (it doesn't know our throwaway key): not for a guest.
+        return;
+    }
+    if (client->state != NetClientState::ready)
+    {
+        return;
+    }
+    if (net_guest_read_bye(data, size, &bye))
+    {
+        client->guest_bye = bye;   // `closed` follows when the host closes
+        return;
+    }
+    if (type >= NET_MESSAGE_FIRST_APP)
+    {
+        event->type = NetClientEventType::message;
+        event->channel = NetChannel::control;
+        event->data = data;
+        event->size = size;
+    }
+}
+
 static void on_control(NetClient* client, const uint8_t* data, size_t size, NetClientEvent* event)
 {
+    if (client->guest)
+    {
+        on_guest_control(client, data, size, event);
+        return;
+    }
     uint8_t type = net_message_type(data, size);
     if (client->state == NetClientState::ready)
     {
@@ -504,6 +656,15 @@ bool net_client_poll(NetClient* client, NetClientEvent* event)
             std::memcpy(client->host_key, session_event.remote_key, NET_KEY_SIZE);
             std::memcpy(client->handshake_hash, session_event.handshake_hash, NET_HASH_SIZE);
             client->state = NetClientState::waiting;
+            if (client->guest)
+            {
+                // The token, for this connection, before anything else.
+                uint8_t mac[NET_GUEST_MAC_SIZE];
+                net_guest_mac(&client->guest_link, false, client->handshake_hash, mac);
+                uint8_t hello[NET_GUEST_MAX_MESSAGE];
+                size_t hello_size = net_guest_write_hello(hello, sizeof(hello), mac, client->name.c_str());
+                net_session_send(&client->session, client->peer, NetChannel::control, hello, hello_size);
+            }
             break;
         case NetSessionEventType::message:
             if (session_event.channel != NetChannel::control)
@@ -541,6 +702,10 @@ bool net_client_poll(NetClient* client, NetClientEvent* event)
             client->via_beacon = false;
             client->via_signal = false;
             client->state = NetClientState::idle;
+            bool guest = client->guest;
+            event->guest = guest;
+            event->guest_bye = client->guest_bye;
+            guest_done(client);
             if (state == NetClientState::ready)
             {
                 event->type = NetClientEventType::closed;
@@ -552,6 +717,12 @@ bool net_client_poll(NetClient* client, NetClientEvent* event)
                 // the NATs didn't let it through.
                 event->refusal = via_beacon && state == NetClientState::connecting ? NetClientRefusal::no_route
                                                                                     : NetClientRefusal::connection;
+                if (guest && state == NetClientState::waiting)
+                {
+                    // The host got through to us and closed without a word:
+                    // the token isn't this session's (ended, or a new link).
+                    event->refusal = NetClientRefusal::guest_link;
+                }
             }
             break;
         }
@@ -590,6 +761,7 @@ void net_client_close(NetClient* client)
         client->via_signal = false;
         client->via_beacon = false;
         client->state = NetClientState::idle;
+        guest_done(client);
         return;
     }
     if (client->state != NetClientState::idle)

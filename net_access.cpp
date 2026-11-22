@@ -38,6 +38,7 @@ void net_access_destroy(NetAccess* access)
         peer_reset(&access->peers[i]);
     }
     net_access_end_invite(access);
+    net_guest_link_wipe(&access->guest_link);
     net_signal_stop(&access->signal);
     net_session_destroy(&access->session);
 }
@@ -62,6 +63,10 @@ static void beacon_refresh_ids(NetAccess* access)
         BeaconId id;
         net_beacon_pair_id(access->invite_slot, &id);
         ids.push_back(id);
+    }
+    if (access->guest_open)
+    {
+        ids.push_back(access->guest_link.meeting);   // the guest link's guests meet us there
     }
     bool same = ids.size() == access->beacon.ids.size();
     for (size_t i = 0; same && i < ids.size(); i++)
@@ -170,7 +175,13 @@ static void on_secured(NetAccess* access, const NetSessionEvent* session_event, 
     bool open = access->accept_pairing && !refused_before(access, peer->key);
     send_control(access, index,
                  net_message_write_pairing_needed(access->out.data(), access->out.size(), open, access->name.c_str()));
-    if (!open)
+    if (!open && access->guest_open)
+    {
+        // It may be a guest (guest_hello follows at once); a pairing client
+        // closes on its own.
+        peer->guest_only = true;
+    }
+    else if (!open)
     {
         // Sent first: ENet delivers queued messages before disconnecting.
         // (A client without a code closes on its own; one with a code waits
@@ -371,6 +382,118 @@ static void forget_device(NetAccess* access, uint32_t device, uint32_t unpaired_
     save_trust(access);
 }
 
+static bool guest_kicked(const NetAccess* access, const uint8_t* key)
+{
+    for (size_t i = 0; i + NET_KEY_SIZE <= access->guest_kicked.size(); i += NET_KEY_SIZE)
+    {
+        if (std::memcmp(&access->guest_kicked[i], key, NET_KEY_SIZE) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+uint32_t net_access_guest_count(const NetAccess* access)
+{
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
+    {
+        if (access->peers[i].state == NetAccessPeerState::guest && !access->peers[i].guest_leaving)
+        {
+            count++;
+        }
+    }
+    return count;
+}
+
+static void send_guest_bye(NetAccess* access, uint32_t index, NetGuestBye reason)
+{
+    uint8_t bye[2];
+    net_session_send(&access->session, index, NetChannel::control, bye, net_guest_write_bye(bye, sizeof(bye), reason));
+}
+
+static void send_guest_welcome(NetAccess* access, uint32_t index)
+{
+    uint8_t mac[NET_GUEST_MAC_SIZE];
+    net_guest_mac(&access->guest_link, true, access->peers[index].handshake_hash, mac);
+    send_control(access, index, net_guest_write_welcome(access->out.data(), access->out.size(), mac, access->guest_level));
+}
+
+// guest_hello from a device we don't know: the link's token, for this very
+// connection. Anything wrong is closed without a word (no dialog, no reply).
+static void on_guest_hello(NetAccess* access, uint32_t index, const uint8_t* data, size_t size, NetAccessEvent* event,
+                           bool* filled)
+{
+    NetAccessPeer* peer = &access->peers[index];
+    uint8_t mac[NET_GUEST_MAC_SIZE];
+    char name[NET_GUEST_MAX_NAME + 1];
+    uint8_t expected[NET_GUEST_MAC_SIZE];
+    bool ok = access->guest_open && net_guest_read_hello(data, size, mac, name);
+    if (ok)
+    {
+        net_guest_mac(&access->guest_link, false, peer->handshake_hash, expected);
+        ok = crypto_verify32(mac, expected) == 0;
+    }
+    if (!ok)
+    {
+        net_session_close(&access->session, index);
+        peer->state = NetAccessPeerState::none;
+        return;
+    }
+    if (guest_kicked(access, peer->key))
+    {
+        send_guest_bye(access, index, NetGuestBye::kicked);
+        net_session_close(&access->session, index);
+        peer->state = NetAccessPeerState::none;
+        return;
+    }
+    if (net_access_guest_count(access) >= access->guest_seats)
+    {
+        uint8_t host_mac[NET_GUEST_MAC_SIZE];
+        net_guest_mac(&access->guest_link, true, peer->handshake_hash, host_mac);
+        send_control(access, index, net_guest_write_full(access->out.data(), access->out.size(), host_mac));
+        net_session_close(&access->session, index);
+        peer->state = NetAccessPeerState::none;
+        access->guest_full_count++;
+        host_log(LogLevel::info, "Network: guest \"%s\" came with the link, but every seat is taken", name);
+        event->type = NetAccessEventType::guest_full;
+        std::snprintf(event->name, sizeof(event->name), "%s", name);
+        *filled = true;
+        return;
+    }
+    peer->state = NetAccessPeerState::guest;
+    peer->guest_only = false;
+    peer->since = net_seconds();
+    std::snprintf(peer->guest_name, sizeof(peer->guest_name), "%s", name);
+    send_guest_welcome(access, index);
+    host_log(LogLevel::info, "Network: guest \"%s\" joined (%u of %u seats)", name,
+             static_cast<unsigned>(net_access_guest_count(access)), static_cast<unsigned>(access->guest_seats));
+    event->type = NetAccessEventType::guest_joined;
+    event->guest = true;
+    event->guest_level = access->guest_level;
+    event->access = NetAccessLevel::stream;
+    std::snprintf(event->name, sizeof(event->name), "%s", name);
+    *filled = true;
+}
+
+// What a guest may send: the stream's start, stop and keyframe requests on the
+// control channel, and its pad on the input channel when the link says PLAY.
+// Nothing that changes the host for everyone (headless, tuning, actions).
+static bool guest_may_send(const NetAccess* access, NetChannel channel, const uint8_t* data, size_t size)
+{
+    if (channel == NetChannel::input)
+    {
+        return access->guest_level == NetGuestLevel::play;
+    }
+    if (channel != NetChannel::control)
+    {
+        return false;
+    }
+    uint8_t type = net_message_type(data, size);
+    return type == 70 || type == 71 || type == 72;   // NET_STREAM_START, STOP, KEYFRAME_REQUEST (net_stream.h)
+}
+
 static bool on_message(NetAccess* access, const NetSessionEvent* session_event, NetAccessEvent* event)
 {
     uint32_t index = session_event->peer;
@@ -445,13 +568,43 @@ static bool on_message(NetAccess* access, const NetSessionEvent* session_event, 
         event->size = session_event->size;
         return true;
     }
+    if (peer->state == NetAccessPeerState::guest)
+    {
+        if (peer->guest_leaving ||
+            !guest_may_send(access, session_event->channel, session_event->data, session_event->size))
+        {
+            access->dropped_by_access++;
+            return false;
+        }
+        event->type = NetAccessEventType::message;
+        event->access = NetAccessLevel::stream;
+        event->guest = true;
+        event->guest_level = access->guest_level;
+        event->peer = index;
+        event->device = -1;
+        event->address = session_event->address;
+        event->channel = session_event->channel;
+        event->data = session_event->data;
+        event->size = session_event->size;
+        return true;
+    }
     if (session_event->channel != NetChannel::control)
     {
         return false;   // input from someone not authorized: ignored
     }
     uint8_t type = net_message_type(session_event->data, session_event->size);
-    if ((peer->state == NetAccessPeerState::unpaired || peer->state == NetAccessPeerState::pairing) &&
-        type == static_cast<uint8_t>(NetMessage::pair_request))
+    if (peer->state == NetAccessPeerState::unpaired && type == static_cast<uint8_t>(NetGuestMessage::hello))
+    {
+        on_guest_hello(access, index, session_event->data, session_event->size, event, &filled);
+    }
+    else if (peer->guest_only)
+    {
+        // Pairing is closed: only a guest_hello could have come.
+        net_session_close(&access->session, index);
+        peer->state = NetAccessPeerState::none;
+    }
+    else if ((peer->state == NetAccessPeerState::unpaired || peer->state == NetAccessPeerState::pairing) &&
+             type == static_cast<uint8_t>(NetMessage::pair_request))
     {
         on_pair_request(access, index, session_event->data, session_event->size, event, &filled);
     }
@@ -483,8 +636,10 @@ static bool check_timers(NetAccess* access, NetAccessEvent* event)
         NetAccessPeer* peer = &access->peers[i];
         bool waiting = peer->state == NetAccessPeerState::unpaired || peer->state == NetAccessPeerState::pairing;
         bool requested = peer->state == NetAccessPeerState::requested;
+        bool hello = peer->state == NetAccessPeerState::unpaired && peer->guest_only;
         if ((waiting && now - peer->since > NET_ACCESS_PAIRING_STEP_SECONDS) ||
-            (requested && now - peer->since > NET_ACCESS_REQUEST_SECONDS))
+            (requested && now - peer->since > NET_ACCESS_REQUEST_SECONDS) ||
+            (hello && now - peer->since > NET_ACCESS_GUEST_HELLO_SECONDS))
         {
             net_session_close(&access->session, i);
             peer->since = now;   // closing takes a moment; don't repeat every frame
@@ -531,6 +686,13 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
                 break;
             }
             net_signal_peer_gone(&access->signal, session_event.peer);
+            if (!session_event.was_secured && access->guest_open)
+            {
+                // A connection that never got through while a link was open:
+                // most likely a guest whose network and ours can't reach each
+                // other directly (no relay: the guest is told so).
+                access->guest_failures++;
+            }
             NetAccessPeer* peer = &access->peers[session_event.peer];
             NetAccessPeerState state = peer->state;
             int32_t device = peer->device;
@@ -543,6 +705,15 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
                 event->type = NetAccessEventType::closed;
                 event->peer = session_event.peer;
                 event->device = -1;
+                event->address = session_event.address;
+                filled = true;
+            }
+            else if (state == NetAccessPeerState::guest)
+            {
+                event->type = NetAccessEventType::closed;
+                event->peer = session_event.peer;
+                event->device = -1;
+                event->guest = true;
                 event->address = session_event.address;
                 filled = true;
             }
@@ -567,7 +738,22 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
 
 bool net_access_send(NetAccess* access, uint32_t peer, NetChannel channel, const uint8_t* data, size_t size)
 {
-    if (peer >= NET_MAX_PEERS || access->peers[peer].state != NetAccessPeerState::authorized)
+    if (peer >= NET_MAX_PEERS)
+    {
+        return false;
+    }
+    if (access->peers[peer].state == NetAccessPeerState::guest)
+    {
+        // A guest only hears what runs (game_state, type 16) and the stream
+        // (64..127, and the stream channel); never the devices, settings or
+        // files of this machine.
+        uint8_t type = net_message_type(data, size);
+        bool allowed = channel == NetChannel::stream ||
+                       (channel == NetChannel::control && (type == NET_MESSAGE_FIRST_APP ||
+                                                            (type >= NET_MESSAGE_FIRST_STREAM && type < NET_MESSAGE_FIRST_FULL)));
+        return allowed && net_session_send(&access->session, peer, channel, data, size);
+    }
+    if (access->peers[peer].state != NetAccessPeerState::authorized)
     {
         return false;
     }
@@ -621,9 +807,15 @@ bool net_access_device_connected(const NetAccess* access, uint32_t device)
     return false;
 }
 
+static bool peer_in(const NetAccess* access, uint32_t peer)
+{
+    return peer < NET_MAX_PEERS && (access->peers[peer].state == NetAccessPeerState::authorized ||
+                                    access->peers[peer].state == NetAccessPeerState::guest);
+}
+
 bool net_access_peer_stats(const NetAccess* access, uint32_t peer, NetLinkStats* stats)
 {
-    if (peer >= NET_MAX_PEERS || access->peers[peer].state != NetAccessPeerState::authorized)
+    if (!peer_in(access, peer))
     {
         return false;
     }
@@ -632,7 +824,7 @@ bool net_access_peer_stats(const NetAccess* access, uint32_t peer, NetLinkStats*
 
 bool net_access_peer_address(const NetAccess* access, uint32_t peer, NetAddress* address)
 {
-    if (peer >= NET_MAX_PEERS || access->peers[peer].state != NetAccessPeerState::authorized)
+    if (!peer_in(access, peer))
     {
         return false;
     }
@@ -703,4 +895,104 @@ bool net_access_set_signal(NetAccess* access, const char* url, const char* stun)
 NetSignalStatus net_access_signal_status(const NetAccess* access)
 {
     return net_signal_status(&access->signal, net_seconds());
+}
+
+// ---------------------------------------------------------------------------
+// Guest links
+// ---------------------------------------------------------------------------
+
+static uint32_t clamp_seats(uint32_t seats)
+{
+    if (seats < 1)
+    {
+        return 1;
+    }
+    return seats > NET_GUEST_MAX_SEATS ? NET_GUEST_MAX_SEATS : seats;
+}
+
+void net_access_guest_open(NetAccess* access, const NetGuestLink* link, uint32_t seats, NetGuestLevel level)
+{
+    bool level_changed = access->guest_open && access->guest_level != level;
+    access->guest_link = *link;
+    access->guest_seats = clamp_seats(seats);
+    access->guest_level = level;
+    access->guest_open = true;
+    net_signal_host_set_guest_room(&access->signal, &access->guest_link.meeting, access->guest_link.signal_key);
+    beacon_refresh_ids(access);
+    if (level_changed)
+    {
+        net_access_guest_set_level(access, level);
+    }
+}
+
+void net_access_guest_set_seats(NetAccess* access, uint32_t seats)
+{
+    access->guest_seats = clamp_seats(seats);
+}
+
+void net_access_guest_set_level(NetAccess* access, NetGuestLevel level)
+{
+    access->guest_level = level;
+    for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
+    {
+        if (access->peers[i].state == NetAccessPeerState::guest && !access->peers[i].guest_leaving)
+        {
+            send_guest_welcome(access, i);
+        }
+    }
+}
+
+void net_access_guest_kick(NetAccess* access, uint32_t peer)
+{
+    if (peer >= NET_MAX_PEERS || access->peers[peer].state != NetAccessPeerState::guest ||
+        access->peers[peer].guest_leaving)
+    {
+        return;
+    }
+    if (!guest_kicked(access, access->peers[peer].key))
+    {
+        access->guest_kicked.insert(access->guest_kicked.end(), access->peers[peer].key,
+                                    access->peers[peer].key + NET_KEY_SIZE);
+    }
+    host_log(LogLevel::info, "Network: guest \"%s\" kicked", access->peers[peer].guest_name);
+    send_guest_bye(access, peer, NetGuestBye::kicked);
+    net_session_close(&access->session, peer);
+    access->peers[peer].guest_leaving = true;
+}
+
+void net_access_guest_close(NetAccess* access)
+{
+    for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
+    {
+        NetAccessPeer* peer = &access->peers[i];
+        if (peer->state == NetAccessPeerState::guest && !peer->guest_leaving)
+        {
+            send_guest_bye(access, i, NetGuestBye::ended);
+            net_session_close(&access->session, i);
+            peer->guest_leaving = true;
+        }
+        else if (peer->guest_only)
+        {
+            net_session_close(&access->session, i);
+        }
+    }
+    bool was = access->guest_open;
+    access->guest_open = false;
+    net_guest_link_wipe(&access->guest_link);
+    access->guest_kicked.clear();
+    if (was)
+    {
+        net_signal_host_set_guest_room(&access->signal, nullptr, nullptr);
+        beacon_refresh_ids(access);
+    }
+}
+
+const NetAccessPeer* net_access_guest(const NetAccess* access, uint32_t peer)
+{
+    if (peer >= NET_MAX_PEERS || access->peers[peer].state != NetAccessPeerState::guest ||
+        access->peers[peer].guest_leaving)
+    {
+        return nullptr;
+    }
+    return &access->peers[peer];
 }

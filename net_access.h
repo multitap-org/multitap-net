@@ -20,6 +20,14 @@
 // `pairing_requested` again, `retry`). A connection gets
 // NET_PAIRING_MAX_FAILURES attempts. Across the internet the host waits in the
 // pairing room of the code's slot (net_access_invite) while its user types it.
+//
+// Guest links (net_guest.h): while a link is open (net_access_guest_open), a
+// device we don't know may prove it has the link's token instead of pairing
+// (guest_hello). It becomes a guest: never saved, at most `seats` at once,
+// reported `guest_joined` and its messages with `guest` set and no device.
+// A guest may only start / stop the stream and ask for keyframes, plus send
+// its pad when the link's level is PLAY; the host only sends it what runs and
+// the stream. A wrong or old token is closed without a word.
 
 #include <cstddef>
 #include <cstdint>
@@ -27,6 +35,7 @@
 #include <vector>
 
 #include "net_beacon.h"
+#include "net_guest.h"
 #include "net_signal.h"
 #include "net_pairing.h"
 #include "net_session.h"
@@ -34,6 +43,7 @@
 
 constexpr double   NET_ACCESS_PAIRING_STEP_SECONDS = 30.0;   // a peer may sit in a pairing step this long
 constexpr double   NET_ACCESS_REQUEST_SECONDS = 1800.0;      // a request waits this long for the host's user
+constexpr double   NET_ACCESS_GUEST_HELLO_SECONDS = 10.0;    // a device that can't pair has this long to say guest_hello
 
 enum class NetAccessPeerState
 {
@@ -42,6 +52,7 @@ enum class NetAccessPeerState
     requested,    // pair_request held: waiting for this host's user (net_access_answer_pairing)
     pairing,      // pair_response sent, waiting for pair_confirm
     authorized,
+    guest,        // proved the guest link's token: a guest (no device)
 };
 
 struct NetAccessPeer
@@ -60,6 +71,9 @@ struct NetAccessPeer
     uint8_t  isk[NET_CPACE_ISK_SIZE] = {};
     int32_t  device = -1;   // index in trust.devices once authorized
     bool     forgotten = false;   // its device was removed while connected: `closed` still reported
+    bool     guest_only = false;  // unpaired while pairing is closed: only guest_hello may follow
+    char     guest_name[NET_GUEST_MAX_NAME + 1] = {};   // a guest: what its app calls itself (unverified)
+    bool     guest_leaving = false;   // kicked or the session ended: closing, no seat, nothing from it
 };
 
 enum class NetAccessEventType
@@ -73,6 +87,8 @@ enum class NetAccessEventType
     pairing_failed,   // `peer`'s attempts ran out (or it broke the protocol): it's closed
     unpaired,         // a connected device unpaired itself: forgotten here too (`name`); `closed` follows
     granted_back,     // the device that just paired lets us come to it at `access` (`peer`, `device`)
+    guest_joined,     // a guest took a seat: `peer`, `name`, `guest_level` (closed, `guest`, when it goes)
+    guest_full,       // a guest came with the link but every seat was taken: `name` (it's closed)
 };
 
 struct NetAccessEvent
@@ -88,6 +104,8 @@ struct NetAccessEvent
     char           name[NET_DEVICE_NAME_MAX + 1] = {};   // unpaired / pairing_requested: the device's name
     NetPairKind  kind = NetPairKind::piccolo;        // pairing_requested
     bool           retry = false;                        // pairing_requested: the last code was wrong
+    bool           guest = false;                        // message / closed / guest_joined: from a guest
+    NetGuestLevel  guest_level = NetGuestLevel::watch;   // guest_joined, a guest's message
 };
 
 struct NetAccess
@@ -106,6 +124,14 @@ struct NetAccess
     std::vector<uint8_t> out;        // messages we write (sized at creation)
     NetBeaconHost beacon;            // across the internet (off until net_access_set_beacon)
     NetSignal     signal;            // WebRTC signaling, for browsers (off until net_access_set_signal)
+    // Guest links (net_guest.h).
+    bool          guest_open = false;
+    NetGuestLink  guest_link;
+    uint32_t      guest_seats = 0;
+    NetGuestLevel guest_level = NetGuestLevel::watch;
+    std::vector<uint8_t> guest_kicked;   // keys kicked this session (NET_KEY_SIZE each): refused
+    uint32_t      guest_failures = 0;    // connections that never got through while a link was open
+    uint32_t      guest_full_count = 0;  // guests turned away: no seat
 };
 
 // `trust_path`: the paired devices file (loaded now, saved on every change).
@@ -160,6 +186,24 @@ NetBeaconStatus net_access_beacon_status(const NetAccess* access);
 // STUN (net_signal_stun); "" turns it off. False if this build has no WebRTC.
 bool net_access_set_signal(NetAccess* access, const char* url, const char* stun);
 NetSignalStatus net_access_signal_status(const NetAccess* access);
+// Guest links. Opens `link` (or replaces the open one: the old token stops
+// working, connected guests stay) with `seats` (1..NET_GUEST_MAX_SEATS) and
+// `level`. Its meeting id and signaling room join the beacon's.
+void net_access_guest_open(NetAccess* access, const NetGuestLink* link, uint32_t seats, NetGuestLevel level);
+// Fewer seats never drop anyone, they only turn newcomers away.
+void net_access_guest_set_seats(NetAccess* access, uint32_t seats);
+// Connected guests are told at once (a new welcome).
+void net_access_guest_set_level(NetAccess* access, NetGuestLevel level);
+// Tells the guest (bye: kicked), closes it, and refuses its key until the
+// link is closed.
+void net_access_guest_kick(NetAccess* access, uint32_t peer);
+// The session ends: every guest is told (bye: ended) and closed, the link and
+// its rooms go, the kicked list is forgotten.
+void net_access_guest_close(NetAccess* access);
+uint32_t net_access_guest_count(const NetAccess* access);
+// The guest at `peer`, or nullptr.
+const NetAccessPeer* net_access_guest(const NetAccess* access, uint32_t peer);
+
 // The two together, for a status line: can paired devices reach us from
 // outside? `registered` when the UDP registration holds or the signaling
 // socket is in its rooms (a browser has only the latter); `symmetric_nat`

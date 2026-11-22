@@ -15,6 +15,11 @@
 // the direction in the associated data, a key both sides derive from their
 // pairing (net_beacon_signal_key).
 //
+// Guest links (net_guest.h): one more room, the link's (role guest host on
+// the host, guest on the client). Several guests meet the host there, each
+// with an index the beacon gives; the host keeps one WebRTC peer per index.
+// Its blobs are sealed with the link's signal key (from the token).
+//
 // Polled from the owner's loop with the NetSession whose WebRTC peers it
 // starts (NetAccess for the host, NetClient for the client). Nothing
 // allocates while polling (the rooms only when the paired devices change).
@@ -47,6 +52,10 @@ struct NetSignalRoom
     uint8_t  key[NET_SIGNAL_KEY_SIZE] = {};
     uint32_t peer = NET_NO_PEER;   // the WebRTC peer this room's signals belong to
     bool     joined = false;       // the beacon answered our JOIN (JOINED) on the socket open now
+    bool     guest = false;        // a guest link's room
+    // Host, guest room: the WebRTC peer of each guest index.
+    uint32_t guest_peers[BEACON_SIGNALING_MAX_GUESTS] = {NET_NO_PEER, NET_NO_PEER, NET_NO_PEER, NET_NO_PEER,
+                                                         NET_NO_PEER, NET_NO_PEER, NET_NO_PEER, NET_NO_PEER};
 };
 
 enum class NetSignalRole
@@ -68,6 +77,7 @@ enum class NetSignalFailure
     none,
     unreachable,    // client: no answer from the beacon
     host_offline,   // client: the host isn't in its room
+    refused,        // client: the beacon refused the room (a guest room full, or too many tries)
 };
 
 struct NetSignal
@@ -96,6 +106,9 @@ void net_signal_host_start(NetSignal* signal, const char* url);
 void net_signal_host_set_rooms(NetSignal* signal, const NetKeypair* own, const uint8_t (*device_keys)[NET_KEY_SIZE],
                                uint32_t count, const char* pair_slot);
 
+// The host's guest link room (`room` nullptr: none). Kept by
+// net_signal_host_set_rooms; a new one replaces the old (its guests' peers go).
+void net_signal_host_set_guest_room(NetSignal* signal, const BeaconId* room, const uint8_t* key);
 // The client: meets the host whose key is `host_key`. False if the keys
 // can't be used or there's no WebRTC in this build.
 bool net_signal_client_start(NetSignal* signal, const char* url, const NetKeypair* own, const uint8_t* host_key,
@@ -104,6 +117,10 @@ bool net_signal_client_start(NetSignal* signal, const char* url, const NetKeypai
 // host that typed the code joins (patient: no time limit, no host_offline).
 bool net_signal_client_start_pair(NetSignal* signal, const char* url, const char* slot, double now);
 
+// A guest: meets the host of a guest link in its room (`key`: the link's
+// signal key).
+bool net_signal_client_start_guest(NetSignal* signal, const char* url, const BeaconId* room, const uint8_t* key,
+                                   double now);
 void net_signal_stop(NetSignal* signal);
 
 // Every poll: the socket, the beacon's messages (starting WebRTC peers in

@@ -10,6 +10,12 @@
 // key is checked against our list, so a machine pretending to be it (with any
 // other key) is refused even if it welcomes us. With a code we pair, and the
 // host's key is added to the list when the host confirms.
+//
+// As a guest (net_guest.h, net_client_join_guest) there's no list: the link's
+// token is what proves the host is the one it names. For that connection the
+// session uses a throwaway key (made once per run, never saved) instead of
+// ours, so the host can't tie a guest to this device, and a host that kicked
+// us refuses the same key if we come back.
 
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +23,7 @@
 #include <vector>
 
 #include "net_beacon.h"
+#include "net_guest.h"
 #include "net_pairing.h"
 #include "net_signal.h"
 #include "net_session.h"
@@ -45,6 +52,9 @@ enum class NetClientRefusal
     beacon_unreachable,   // across the internet: no beacon server answered
     host_offline,     // across the internet: the beacon doesn't know the host (not running, internet off there)
     no_route,         // across the internet: the beacon introduced us, but no path got through the NATs
+    guest_full,       // guest: every seat is taken
+    guest_link,       // guest: the link doesn't work any more (the session ended, or the host made a new one)
+    guest_kicked,     // guest: the host kicked us (and refuses us for the rest of its session)
 };
 
 enum class NetClientEventType
@@ -58,6 +68,8 @@ enum class NetClientEventType
     unpaired,  // the host unpaired us: it's gone from our list too (`closed` follows when it closes)
     code_changed,   // the host typed our code wrong: show the new one (client->code); still pairing
 };
+// (A guest's `ready` and `access` carry `guest` and `guest_level`; its `closed`
+// says why in `guest_bye` when the host said.)
 
 struct NetClientEvent
 {
@@ -69,6 +81,9 @@ struct NetClientEvent
     NetChannel     channel = NetChannel::control;
     const uint8_t* data = nullptr;   // message: valid until the next poll
     size_t         size = 0;
+    bool           guest = false;
+    NetGuestLevel  guest_level = NetGuestLevel::watch;
+    NetGuestBye    guest_bye = NetGuestBye::none;
 };
 
 struct NetClient
@@ -106,6 +121,14 @@ struct NetClient
     uint8_t        meet_key[NET_KEY_SIZE] = {};   // the host being met through the beacon
     bool           meet_pairing = false; // met in its pairing room (net_client_pair_beacon)
     bool           expect_key = false;   // the host must turn out to have meet_key
+    // Guest links.
+    bool           guest = false;        // this connection is a guest link's
+    NetGuestLink   guest_link;
+    NetKeypair     guest_identity;       // throwaway, made at the first guest join of this run
+    bool           has_guest_identity = false;
+    NetKeypair     home_identity;        // ours, put back when the guest connection ends
+    NetGuestLevel  guest_level = NetGuestLevel::watch;
+    NetGuestBye    guest_bye = NetGuestBye::none;   // what the host said before closing
 };
 
 bool net_client_create(NetClient* client, const NetKeypair* identity, const char* name, const char* trust_path);
@@ -134,6 +157,11 @@ bool net_client_connect_beacon(NetClient* client, const NetAddress* servers, uin
 // (patient: no time limit) until the host joins it, then pair as on the LAN.
 // UDP when `count` > 0, else WebRTC through the signaling (a browser).
 bool net_client_pair_beacon(NetClient* client, const NetAddress* servers, uint32_t count, const char* code);
+// Joins the session of a guest link (net_guest_link_parse) through a beacon:
+// UDP first, else WebRTC through the signaling (net_client_set_signal), as
+// net_client_connect_beacon. `ready` (guest) or `refused` follows.
+bool net_client_join_guest(NetClient* client, const NetGuestLink* link, const NetAddress* servers, uint32_t count);
+
 // The beacon's signaling (net_signal_url / net_signal_stun); "" = none.
 void net_client_set_signal(NetClient* client, const char* url, const char* stun);
 bool net_client_poll(NetClient* client, NetClientEvent* event);

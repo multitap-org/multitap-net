@@ -94,18 +94,68 @@ static void keep_peer(const NetSignal* signal, NetSignalRoom* room)
 {
     for (size_t j = 0; j < signal->rooms.size(); j++)
     {
-        if (beacon_id_equal(&signal->rooms[j].room, &room->room))
+        if (beacon_id_equal(&signal->rooms[j].room, &room->room) && signal->rooms[j].guest == room->guest)
         {
             room->peer = signal->rooms[j].peer;   // a room that stays keeps its connection
             room->joined = signal->rooms[j].joined;   // ... and stays joined
+            std::memcpy(room->guest_peers, signal->rooms[j].guest_peers, sizeof(room->guest_peers));
         }
     }
+}
+
+static bool send_message(NetSignal* signal, const BeaconSignalingMessage* message);
+
+void net_signal_host_set_guest_room(NetSignal* signal, const BeaconId* room, const uint8_t* key)
+{
+    // The old guest room is left on the beacon at once (its card goes with it,
+    // and guests of an old link find nobody there).
+    for (size_t j = 0; j < signal->rooms.size(); j++)
+    {
+        bool same = room != nullptr && beacon_id_equal(&signal->rooms[j].room, room);
+        if (signal->rooms[j].guest && !same && signal->open)
+        {
+            BeaconSignalingMessage leave;
+            leave.type = BeaconSignalingType::LEAVE;
+            leave.room = signal->rooms[j].room;
+            send_message(signal, &leave);
+        }
+    }
+    std::vector<NetSignalRoom> rooms;
+    if (room != nullptr)
+    {
+        NetSignalRoom guest;
+        guest.room = *room;
+        guest.guest = true;
+        std::memcpy(guest.key, key, NET_SIGNAL_KEY_SIZE);
+        keep_peer(signal, &guest);
+        rooms.push_back(guest);
+    }
+    for (size_t j = 0; j < signal->rooms.size(); j++)
+    {
+        if (signal->rooms[j].guest)
+        {
+            crypto_wipe(signal->rooms[j].key, sizeof(signal->rooms[j].key));
+        }
+        else
+        {
+            rooms.push_back(signal->rooms[j]);
+        }
+    }
+    signal->rooms = rooms;
+    signal->next_join = 0.0;   // the new room joins at the next update
 }
 
 void net_signal_host_set_rooms(NetSignal* signal, const NetKeypair* own, const uint8_t (*device_keys)[NET_KEY_SIZE],
                                uint32_t count, const char* pair_slot)
 {
     std::vector<NetSignalRoom> rooms;
+    for (size_t j = 0; j < signal->rooms.size(); j++)
+    {
+        if (signal->rooms[j].guest)
+        {
+            rooms.push_back(signal->rooms[j]);   // the guest link's room stays (net_signal_host_set_guest_room)
+        }
+    }
     if (pair_slot != nullptr)
     {
         NetSignalRoom room;
@@ -127,7 +177,10 @@ void net_signal_host_set_rooms(NetSignal* signal, const NetKeypair* own, const u
     }
     for (size_t j = 0; j < signal->rooms.size(); j++)
     {
-        crypto_wipe(signal->rooms[j].key, sizeof(signal->rooms[j].key));
+        if (!signal->rooms[j].guest)
+        {
+            crypto_wipe(signal->rooms[j].key, sizeof(signal->rooms[j].key));
+        }
     }
     signal->rooms = rooms;
     signal->next_join = 0.0;   // joined again at the next update (new rooms at once)
@@ -167,6 +220,23 @@ bool net_signal_client_start_pair(NetSignal* signal, const char* url, const char
     return signal->socket != nullptr;
 }
 
+bool net_signal_client_start_guest(NetSignal* signal, const char* url, const BeaconId* room, const uint8_t* key,
+                                   double now)
+{
+    net_signal_stop(signal);
+    NetSignalRoom guest;
+    guest.room = *room;
+    guest.guest = true;
+    std::memcpy(guest.key, key, NET_SIGNAL_KEY_SIZE);
+    signal->role = NetSignalRole::client;
+    signal->url = url;
+    signal->rooms.push_back(guest);
+    signal->socket = net_rtc_socket_open(url);
+    signal->started = now;
+    signal->failure = NetSignalFailure::none;
+    return signal->socket != nullptr;
+}
+
 static bool send_message(NetSignal* signal, const BeaconSignalingMessage* message)
 {
     uint32_t size = beacon_signaling_encode(message, signal->out, sizeof(signal->out));
@@ -180,7 +250,15 @@ static void join_all(NetSignal* signal)
         BeaconSignalingMessage join;
         join.type = BeaconSignalingType::JOIN;
         join.room = signal->rooms[i].room;
-        join.role = signal->role == NetSignalRole::host ? BeaconRole::HOST : BeaconRole::CLIENT;
+        bool host = signal->role == NetSignalRole::host;
+        if (signal->rooms[i].guest)
+        {
+            join.role = host ? BeaconRole::GUEST_HOST : BeaconRole::GUEST;
+        }
+        else
+        {
+            join.role = host ? BeaconRole::HOST : BeaconRole::CLIENT;
+        }
         send_message(signal, &join);
     }
 }
@@ -197,10 +275,13 @@ static NetSignalRoom* room_of(NetSignal* signal, const BeaconId* id)
     return nullptr;
 }
 
-// Seals `size` bytes of `blob` for the other side of `room` and sends it.
-static void send_blob(NetSignal* signal, NetSignalRoom* room, const uint8_t* blob, size_t size)
+// Seals `size` bytes of `blob` for the other side of `room` and sends it
+// (on a host's guest room: to guest `guest`).
+static void send_blob(NetSignal* signal, NetSignalRoom* room, const uint8_t* blob, size_t size, uint32_t guest)
 {
-    if (!signal->open || size == 0 || size + NET_SIGNAL_OVERHEAD > BEACON_SIGNALING_MAX_BLOB)
+    // In a guest room the beacon adds the guest's index: 4 bytes less.
+    size_t limit = room->guest ? BEACON_SIGNALING_MAX_GUEST_BLOB : BEACON_SIGNALING_MAX_BLOB;
+    if (!signal->open || size == 0 || size + NET_SIGNAL_OVERHEAD > limit)
     {
         return;
     }
@@ -216,6 +297,11 @@ static void send_blob(NetSignal* signal, NetSignalRoom* room, const uint8_t* blo
     message.room = room->room;
     message.blob = sealed;
     message.blob_size = static_cast<uint32_t>(size + NET_SIGNAL_OVERHEAD);
+    if (room->guest && signal->role == NetSignalRole::host)
+    {
+        message.type = BeaconSignalingType::GUEST_SIGNAL;
+        message.guest = static_cast<uint8_t>(guest);
+    }
     send_message(signal, &message);
 }
 
@@ -223,10 +309,19 @@ void net_signal_outgoing(NetSignal* signal, uint32_t peer, const uint8_t* blob, 
 {
     for (size_t i = 0; i < signal->rooms.size(); i++)
     {
-        if (signal->rooms[i].peer == peer)
+        NetSignalRoom* room = &signal->rooms[i];
+        if (room->peer == peer)
         {
-            send_blob(signal, &signal->rooms[i], blob, size);
+            send_blob(signal, room, blob, size, 0);
             return;
+        }
+        for (uint32_t g = 0; room->guest && g < BEACON_SIGNALING_MAX_GUESTS; g++)
+        {
+            if (room->guest_peers[g] == peer)
+            {
+                send_blob(signal, room, blob, size, g);
+                return;
+            }
         }
     }
 }
@@ -239,6 +334,13 @@ void net_signal_peer_gone(NetSignal* signal, uint32_t peer)
         {
             signal->rooms[i].peer = NET_NO_PEER;
         }
+        for (uint32_t g = 0; g < BEACON_SIGNALING_MAX_GUESTS; g++)
+        {
+            if (signal->rooms[i].guest_peers[g] == peer)
+            {
+                signal->rooms[i].guest_peers[g] = NET_NO_PEER;
+            }
+        }
     }
 }
 
@@ -247,6 +349,36 @@ void net_signal_peer_gone(NetSignal* signal, uint32_t peer)
 static bool is_offer(const uint8_t* blob, size_t size)
 {
     return size > 7 && blob[0] == 'd' && std::memcmp(blob + 1, "offer", 6) == 0;
+}
+
+// A guest's blob in the host's guest room: an offer starts its peer.
+static void on_guest_signal(NetSignal* signal, NetSession* session, NetSignalRoom* room, uint32_t guest,
+                            const uint8_t* sealed, size_t size)
+{
+    if (size <= NET_SIGNAL_OVERHEAD || guest >= BEACON_SIGNALING_MAX_GUESTS)
+    {
+        return;
+    }
+    size_t plain_size = size - NET_SIGNAL_OVERHEAD;
+    uint8_t from = FROM_CLIENT;
+    if (crypto_aead_unlock(signal->plain, sealed + 24, room->key, sealed, &from, 1, sealed + 40, plain_size) != 0)
+    {
+        return;   // not sealed with this link's key: dropped
+    }
+    if (is_offer(signal->plain, plain_size))
+    {
+        uint32_t peer = NET_NO_PEER;
+        if (!net_session_rtc_accept(session, &peer))
+        {
+            host_log(LogLevel::warning, "Network: a guest's WebRTC offer came, but there's no free peer slot");
+            return;
+        }
+        room->guest_peers[guest] = peer;
+    }
+    if (room->guest_peers[guest] != NET_NO_PEER)
+    {
+        net_session_rtc_signal(session, room->guest_peers[guest], signal->plain, plain_size);
+    }
 }
 
 static void on_signal(NetSignal* signal, NetSession* session, NetSignalRoom* room, const uint8_t* sealed, size_t size)
@@ -325,9 +457,29 @@ static void on_message(NetSignal* signal, NetSession* session, const uint8_t* da
     case BeaconSignalingType::SIGNAL:
         on_signal(signal, session, room, message.blob, message.blob_size);
         break;
-    case BeaconSignalingType::REFUSED:
-        host_log(LogLevel::warning, "Network: the beacon refused a signaling room (its limit)");
+    case BeaconSignalingType::GUEST_SIGNAL:
+        if (!client && room->guest)
+        {
+            on_guest_signal(signal, session, room, message.guest, message.blob, message.blob_size);
+        }
         break;
+    case BeaconSignalingType::GUEST_LEFT:
+        // The guest's socket to the beacon went: its peer, if it got through,
+        // lives on (the connection is direct); its index can be taken again.
+        if (!client && room->guest && message.guest < BEACON_SIGNALING_MAX_GUESTS)
+        {
+            room->guest_peers[message.guest] = NET_NO_PEER;
+        }
+        break;
+    case BeaconSignalingType::REFUSED:
+        host_log(LogLevel::warning, "Network: the beacon refused a signaling room (reason %u)",
+                 static_cast<unsigned>(message.reason));
+        if (client && net_signal_client_peer(signal) == NET_NO_PEER && signal->failure == NetSignalFailure::none)
+        {
+            signal->failure = NetSignalFailure::refused;
+        }
+        break;
+    case BeaconSignalingType::GUEST_JOINED:
     case BeaconSignalingType::LEFT:
     case BeaconSignalingType::JOIN:
     case BeaconSignalingType::LEAVE:
