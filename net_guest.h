@@ -136,7 +136,8 @@ bool   net_guest_read_port(const uint8_t* data, size_t size, uint8_t* port);
 // control characters). `out` holds NET_GUEST_MAX_TITLE + 1 bytes.
 void net_guest_title_clean(const char* name, char* out);
 
-// The beacon's card upload body: card key, title, PNG (PROTOCOL.md). False if
-// the title or the PNG is out of bounds.
+// The beacon's card upload body: card key, title, PNG (PROTOCOL.md); no PNG
+// (`png_size` 0) is a card with only its title. False if the title or the
+// PNG is out of bounds.
 bool net_guest_card_body(const NetGuestLink* link, const char* title, const uint8_t* png, size_t png_size,
                          std::vector<uint8_t>* out);

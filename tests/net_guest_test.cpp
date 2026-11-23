@@ -222,6 +222,8 @@ static void test_card()
               std::memcmp(body.data() + 33, "Zelda", 5) == 0 && body[38] == 7,
           "card key, title, PNG");
     check(!net_guest_card_body(&link, "", png.data(), png.size(), &body), "no title");
+    check(net_guest_card_body(&link, "Zelda", nullptr, 0, &body) && body.size() == 32 + 1 + 5,
+          "a card with only its title");
     std::vector<uint8_t> big(NET_GUEST_CARD_MAX_PNG + 1, 0);
     check(!net_guest_card_body(&link, "Zelda", big.data(), big.size(), &body), "a PNG too big");
 }

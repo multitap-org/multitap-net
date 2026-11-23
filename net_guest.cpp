@@ -530,7 +530,9 @@ bool net_guest_card_body(const NetGuestLink* link, const char* title, const uint
                          std::vector<uint8_t>* out)
 {
     size_t title_size = std::strlen(title);
-    if (title_size == 0 || title_size > NET_GUEST_MAX_TITLE || png_size == 0 || png_size > NET_GUEST_CARD_MAX_PNG)
+    // No PNG is fine: the card then has only its title (the beacon shows
+    // white noise for the picture).
+    if (title_size == 0 || title_size > NET_GUEST_MAX_TITLE || png_size > NET_GUEST_CARD_MAX_PNG)
     {
         return false;
     }
@@ -539,6 +541,9 @@ bool net_guest_card_body(const NetGuestLink* link, const char* title, const uint
     out->insert(out->end(), link->card_key, link->card_key + NET_GUEST_KEY_SIZE);
     out->push_back(static_cast<uint8_t>(title_size));
     out->insert(out->end(), reinterpret_cast<const uint8_t*>(title), reinterpret_cast<const uint8_t*>(title) + title_size);
-    out->insert(out->end(), png, png + png_size);
+    if (png_size > 0)
+    {
+        out->insert(out->end(), png, png + png_size);
+    }
     return true;
 }
