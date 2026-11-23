@@ -589,3 +589,19 @@ uint32_t net_signal_client_peer(const NetSignal* signal)
 {
     return signal->rooms.empty() ? NET_NO_PEER : signal->rooms[0].peer;
 }
+
+bool net_signal_guest_room_joined(const NetSignal* signal)
+{
+    if (signal->url.empty() || !signal->open)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < signal->rooms.size(); i++)
+    {
+        if (signal->rooms[i].guest)
+        {
+            return signal->rooms[i].joined;
+        }
+    }
+    return false;
+}

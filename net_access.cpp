@@ -996,3 +996,8 @@ const NetAccessPeer* net_access_guest(const NetAccess* access, uint32_t peer)
     }
     return &access->peers[peer];
 }
+
+bool net_access_guest_ready(const NetAccess* access)
+{
+    return access->guest_open && net_signal_guest_room_joined(&access->signal);
+}

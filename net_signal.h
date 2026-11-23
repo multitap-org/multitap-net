@@ -136,5 +136,8 @@ NetSignalStatus net_signal_status(const NetSignal* signal, double now);
 // a moment ago may not be there yet: a client arriving before it would be
 // told its host is offline).
 bool net_signal_rooms_joined(const NetSignal* signal);
+// Host: the beacon has answered the JOIN of the guest link's room on the
+// socket open now (a card can be uploaded for it from then on).
+bool net_signal_guest_room_joined(const NetSignal* signal);
 // The client's WebRTC peer, once it offered (NET_NO_PEER before).
 uint32_t net_signal_client_peer(const NetSignal* signal);

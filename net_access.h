@@ -201,6 +201,9 @@ void net_access_guest_kick(NetAccess* access, uint32_t peer);
 // its rooms go, the kicked list is forgotten.
 void net_access_guest_close(NetAccess* access);
 uint32_t net_access_guest_count(const NetAccess* access);
+// The open link's room is on the beacon (its signaling answered our JOIN):
+// guests coming through WebRTC can find us, and its card can be uploaded.
+bool net_access_guest_ready(const NetAccess* access);
 // The guest at `peer`, or nullptr.
 const NetAccessPeer* net_access_guest(const NetAccess* access, uint32_t peer);
 
