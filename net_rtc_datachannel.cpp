@@ -13,7 +13,9 @@
 
 #include "net_rtc.h"
 
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -151,7 +153,47 @@ static void RTC_API on_closed(int dc, void* user)
 
 static void RTC_API on_log(rtcLogLevel level, const char* message)
 {
-    host_log(level <= RTC_LOG_ERROR ? LogLevel::error : LogLevel::warning, "WebRTC: %s", message);
+    LogLevel ours = LogLevel::info;
+    if (level <= RTC_LOG_ERROR)
+    {
+        ours = LogLevel::error;
+    }
+    else if (level == RTC_LOG_WARNING)
+    {
+        ours = LogLevel::warning;
+    }
+    // With MULTITAP_RTC_LOG: the time since the first line, to see the gaps.
+    static double first = -1.0;
+    double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (first < 0.0)
+    {
+        first = now;
+    }
+    host_log(ours, "WebRTC: [%.3f] %s", now - first, message);
+}
+
+// How much libdatachannel says: warnings, or more with MULTITAP_RTC_LOG=info /
+// debug / verbose (to see ICE, DTLS and SCTP step by step; net_rtc_test sets it).
+static rtcLogLevel log_level()
+{
+    const char* wanted = std::getenv("MULTITAP_RTC_LOG");
+    if (wanted == nullptr)
+    {
+        return RTC_LOG_WARNING;
+    }
+    if (std::strcmp(wanted, "info") == 0)
+    {
+        return RTC_LOG_INFO;
+    }
+    if (std::strcmp(wanted, "debug") == 0)
+    {
+        return RTC_LOG_DEBUG;
+    }
+    if (std::strcmp(wanted, "verbose") == 0)
+    {
+        return RTC_LOG_VERBOSE;
+    }
+    return RTC_LOG_WARNING;
 }
 
 bool net_rtc_only()
@@ -169,7 +211,7 @@ NetRtc* net_rtc_create(const char* stun)
     static bool logger = false;
     if (!logger)
     {
-        rtcInitLogger(RTC_LOG_WARNING, on_log);
+        rtcInitLogger(log_level(), on_log);
         logger = true;
     }
     NetRtc* rtc = new NetRtc();

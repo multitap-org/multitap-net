@@ -27,6 +27,7 @@ static void forget_secrets(NetClient* client)
     client->has_code = false;
     client->failures = 0;
     client->just_paired = false;
+    client->welcome_pending = false;
 }
 
 void net_client_set_pairing(NetClient* client, NetAccessLevel want, NetPairKind kind)
@@ -581,6 +582,23 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
     }
     else if (client->state == NetClientState::pairing || client->state == NetClientState::confirming)
     {
+        // Paired: the host's welcome right after its result says the level
+        // its user picked (Andrés, 2026-11-22: given STREAM, the phone kept
+        // GAMEPAD, the level it had asked for, since it closed before this).
+        char host_name[NET_DEVICE_NAME_MAX + 1];
+        NetAccessLevel level = NetAccessLevel::gamepad;
+        if (client->welcome_pending && net_message_read_welcome(data, size, &level, host_name))
+        {
+            client->welcome_pending = false;
+            client->access = level;
+            client->state = NetClientState::ready;
+            client->just_paired = true;
+            event->type = NetClientEventType::ready;
+            event->newly_paired = true;
+            event->access = level;
+            event->device = client->device;
+            return;
+        }
         bool ok = false;
         if (net_message_read_pair_result(data, size, &ok) && ok && client->state == NetClientState::confirming)
         {
@@ -591,13 +609,7 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
             }
             forget_secrets(client);
             client->device = static_cast<int32_t>(device);
-            client->access = client->want;   // until the welcome that follows says what the host gave
-            client->state = NetClientState::ready;
-            client->just_paired = true;
-            event->type = NetClientEventType::ready;
-            event->newly_paired = true;
-            event->access = client->access;
-            event->device = client->device;
+            client->welcome_pending = true;   // `ready` once the welcome says our level (just after)
             return;
         }
         refuse(client, NetClientRefusal::refused, false, event);   // the host closes after a refused result
@@ -620,6 +632,25 @@ bool net_client_poll(NetClient* client, NetClientEvent* event)
         {
             // Our WebRTC blob (offer, candidates): to the host through the beacon.
             net_signal_outgoing(&client->signal, session_event.peer, session_event.data, session_event.size);
+            continue;
+        }
+        if (session_event.type == NetSessionEventType::beacon &&
+            session_event.beacon.type == BeaconType::PRESENT)
+        {
+            uint64_t round = session_event.beacon.nonce - client->presence_base;
+            if (client->presence_base != 0 && round < (client->online_pending.size() + 7) / 8)
+            {
+                for (uint32_t bit = 0; bit < BEACON_MAX_IDS; bit++)
+                {
+                    size_t device = static_cast<size_t>(round) * BEACON_MAX_IDS + bit;
+                    if (device < client->online_pending.size() && (session_event.beacon.present & (1u << bit)) != 0)
+                    {
+                        client->online_pending[device] = 1;
+                    }
+                }
+                client->online = client->online_pending;
+                client->presence_answered = true;
+            }
             continue;
         }
         if (session_event.type == NetSessionEventType::beacon)
@@ -813,4 +844,36 @@ size_t net_client_pending(const NetClient* client)
         return 0;
     }
     return net_host_peer_pending(&client->session.host, client->peer);
+}
+
+void net_client_ask_presence(NetClient* client, const NetAddress* servers, uint32_t count)
+{
+    size_t devices = client->trust.devices.size();
+    client->online_pending.assign(devices, 0);
+    if (client->online.size() != devices)
+    {
+        client->online.assign(devices, 0);
+    }
+    if (devices == 0 || count == 0)
+    {
+        return;
+    }
+    // A new range of nonces per round, so a late answer from the last one is
+    // told apart (it falls outside).
+    client->presence_base = (client->presence_base == 0 ? 0x10000u : client->presence_base) + 0x100u;
+    for (size_t first = 0; first < devices; first += BEACON_MAX_IDS)
+    {
+        BeaconId ids[BEACON_MAX_IDS];
+        uint32_t id_count = 0;
+        for (size_t i = first; i < devices && id_count < BEACON_MAX_IDS; i++)
+        {
+            if (!net_beacon_meeting_id(&client->session.identity, client->trust.devices[i].key, &ids[id_count]))
+            {
+                std::memset(ids[id_count].bytes, 0xff, BEACON_ID_SIZE);   // can't be met: asks for nothing real
+            }
+            id_count++;
+        }
+        net_beacon_ask_presence(&client->session.host, servers, count, ids, id_count,
+                                client->presence_base + first / BEACON_MAX_IDS);
+    }
 }
