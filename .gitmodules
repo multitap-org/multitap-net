@@ -1,0 +1,25 @@
+# Only for building and testing multitap-net on its own (its CI). A program
+# that has multitap-net as a submodule provides these itself
+# (MULTITAP_DEPS_DIR), so they're `update = none`: a recursive clone of that
+# program doesn't fetch second copies. Here: git submodule update --init --checkout
+# (libdatachannel also needs --recursive for its own submodules).
+[submodule "deps/hosts-common"]
+	path = deps/hosts-common
+	url = https://github.com/multitap-org/hosts-common.git
+	update = none
+[submodule "deps/enet"]
+	path = deps/enet
+	url = https://github.com/zpl-c/enet.git
+	update = none
+[submodule "deps/monocypher"]
+	path = deps/monocypher
+	url = https://github.com/LoupVaillant/Monocypher.git
+	update = none
+[submodule "deps/beacon"]
+	path = deps/beacon
+	url = https://github.com/multitap-org/multitap-beacon.git
+	update = none
+[submodule "deps/libdatachannel"]
+	path = deps/libdatachannel
+	url = https://github.com/paullouisageneau/libdatachannel.git
+	update = none

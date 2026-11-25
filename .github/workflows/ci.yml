@@ -1,0 +1,99 @@
+# Builds multitap-net on its own and runs its tests:
+#   Linux:   warnings as errors, a normal Debug build and an ASan + UBSan one.
+#   Windows: MSYS2 UCRT64 (GCC + the Universal CRT), as piccolo builds it.
+# Android and the browser build it inside piccolo and piccoletto (their CI).
+# The submodules in deps/ are `update = none` (.gitmodules): checked out here
+# by name.
+name: CI
+
+on:
+  push:
+    branches: [main, multitap-net]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # No GUI code may reach the network core: no SDL, ImGui or Vulkan in our files.
+  no-gui:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: No SDL, ImGui or Vulkan
+        run: |
+          if git grep -nIiE '#include *[<"](SDL|imgui|vulkan)' -- ':!deps'; then
+            echo "multitap-net must not include GUI headers"
+            exit 1
+          fi
+
+  linux:
+    name: Linux (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debug
+            sanitize: OFF
+          - name: ASan
+            sanitize: ON
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Submodules
+        run: |
+          git submodule update --init --checkout --depth 1 deps/hosts-common deps/enet deps/monocypher deps/beacon
+          git submodule update --init --checkout --depth 1 deps/libdatachannel
+          git -C deps/libdatachannel submodule update --init --recursive --depth 1
+
+      # OpenSSL: libdatachannel's TLS and DTLS on the desktop.
+      - name: Packages
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libssl-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DMULTITAP_WARNINGS_AS_ERRORS=ON -DMULTITAP_SANITIZE=${{ matrix.sanitize }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  windows:
+    name: Windows (UCRT64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - run: git config --global core.autocrlf false
+        shell: pwsh
+
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: git
+          pacboy: >-
+            cc:p
+            cmake:p
+            ninja:p
+            openssl:p
+
+      - name: Submodules
+        run: |
+          git submodule update --init --checkout --depth 1 deps/hosts-common deps/enet deps/monocypher deps/beacon
+          git submodule update --init --checkout --depth 1 deps/libdatachannel
+          git -C deps/libdatachannel submodule update --init --recursive --depth 1
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DMULTITAP_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
