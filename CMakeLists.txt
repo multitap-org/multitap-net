@@ -150,6 +150,13 @@ if(NOT EMSCRIPTEN AND EXISTS "${MULTITAP_LIBDATACHANNEL}/CMakeLists.txt")
         if(TARGET datachannel-static AND NOT MSVC)
             target_compile_options(datachannel-static PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include algorithm>")
         endif()
+        # MinGW: winpthreads' rwlock (under std::shared_mutex) can fail a
+        # writer with EINVAL instead of making it wait; libdatachannel gets a
+        # shared_mutex on an SRWLOCK instead. See libdatachannel_mingw.h.
+        if(TARGET datachannel-static AND MINGW)
+            target_compile_options(datachannel-static PRIVATE
+                "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/libdatachannel_mingw.h>")
+        endif()
     endif()
 endif()
 # In the browser WebRTC is the browser's own (net_rtc_emscripten.cpp +
