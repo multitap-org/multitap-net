@@ -102,14 +102,17 @@ int main(int argc, char** argv)
 #endif
 
     NetShareFolders folders;
-    std::vector<std::string> games;
-    games.push_back(roms);
-    games.push_back(roms2);
-    games.push_back(base + "/missing");
+    NetShareFolderPaths paths;
+    paths.games.push_back(roms);
+    paths.games.push_back(roms2);
+    paths.games.push_back(base + "/missing");
     std::string named_saves = base + "/SAVES";
     host_fs_make_directories(named_saves.c_str());
-    games.push_back(named_saves);
-    net_share_set_folders(&folders, &games, saves.c_str(), states.c_str(), screenshots.c_str());
+    paths.games.push_back(named_saves);
+    paths.saves = saves;
+    paths.states = states;
+    paths.screenshots = screenshots;
+    net_share_set_folders(&folders, &paths);
     check(folders.roots.size() == 6, "missing folders left out");
     check(folders.roots.size() == 6 && folders.roots[0].name == "roms" && folders.roots[1].name == "roms 2" &&
               folders.roots[2].name == "SAVES 2" && folders.roots[3].name == "SAVES" &&
@@ -271,6 +274,56 @@ int main(int argc, char** argv)
     check(host_fs_read_file(secret.c_str(), &data, &data_size) && data_size == 6 && std::memcmp(data, "SECRET", 6) == 0,
           "the outside file is untouched");
     delete[] data;
+
+    // RECORDINGS and CONFIG (2026-11-25). CONFIG never shows what makes a
+    // device itself, at any depth, nor the frontend's own names.
+    std::string recordings = base + "/recordings";
+    std::string config = base + "/config";
+    std::string remap = config + "/remaps/mGBA/Metroid Fusion.rmp";
+    write_text(&remap, "REMAP");
+    std::string identity = config + "/net_identity.cfg";
+    write_text(&identity, "secret = x");
+    std::string devices = config + "/net_devices.cfg";
+    write_text(&devices, "[device:x]");
+    std::string cached = config + "/cache/thumbs.bin";
+    write_text(&cached, "C");
+    std::string nested = config + "/remaps/Net_Devices.CFG";
+    write_text(&nested, "N");
+    std::string global = config + "/piccolo.cfg";
+    write_text(&global, "G");
+    host_fs_make_directories(recordings.c_str());
+    NetShareFolderPaths more;
+    more.recordings = recordings;
+    more.config = config;
+    more.config_refused.push_back("piccolo.cfg");
+    NetShareFolders config_folders;
+    net_share_set_folders(&config_folders, &more);
+    check(config_folders.roots.size() == 2 && config_folders.roots[0].name == "RECORDINGS" &&
+              config_folders.roots[0].kind == NetShareKind::recordings && config_folders.roots[1].name == "CONFIG" &&
+              config_folders.roots[1].kind == NetShareKind::config,
+          "RECORDINGS and CONFIG roots, with their kinds");
+    check(net_share_list(&config_folders, "CONFIG", &entries) == NetShareStatus::ok && entries.size() == 1 &&
+              entries[0].name == "remaps",
+          "CONFIG lists only what doesn't belong to the device (no identity, devices, cache, frontend file)");
+    check(net_share_list(&config_folders, "CONFIG/remaps", &entries) == NetShareStatus::ok &&
+              has_entry(&entries, "mGBA") && !has_entry(&entries, "Net_Devices.CFG"),
+          "refused names at any depth, ignoring case");
+    std::string real_path;
+    check(net_share_resolve_get(&config_folders, "CONFIG/net_identity.cfg", &real_path, &file_size, &mtime) ==
+              NetShareStatus::not_found,
+          "the identity can't be read through CONFIG");
+    check(net_share_resolve_get(&config_folders, "CONFIG/remaps/mGBA/Metroid Fusion.rmp", &real_path, &file_size,
+                                &mtime) == NetShareStatus::ok,
+          "a remap can");
+    check(net_share_begin_put(&config_folders, "CONFIG/net_devices.cfg", 1, 0, NET_SHARE_PUT_REPLACE, &target, &part,
+                              &offset) == NetShareStatus::not_found,
+          "the paired devices can't be written through CONFIG");
+    check(net_share_begin_put(&config_folders, "CONFIG/cache/new.bin", 1, 0, 0, &target, &part, &offset) ==
+              NetShareStatus::not_found,
+          "nor anything in cache/");
+    check(net_share_begin_put(&config_folders, "CONFIG/piccolo.cfg", 1, 0, NET_SHARE_PUT_REPLACE, &target, &part,
+                              &offset) == NetShareStatus::not_found,
+          "nor the frontend's global settings");
 
     if (g_failures == 0)
     {

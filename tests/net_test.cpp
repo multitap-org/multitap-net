@@ -62,41 +62,82 @@ static void test_pair_codes()
     check(slots_vary, "the slot digits are random too");
 }
 
-static void test_access_levels()
+static NetDeviceInfo make_info(const char* name, NetDeviceKind kind, NetCaps offers, NetCaps uses)
 {
-    check(net_message_required_access(16) == NetAccessLevel::gamepad &&
-              net_message_required_access(63) == NetAccessLevel::gamepad,
-          "16..63 need gamepad");
-    check(net_message_required_access(64) == NetAccessLevel::stream &&
-              net_message_required_access(127) == NetAccessLevel::stream,
-          "64..127 need stream");
-    check(net_message_required_access(128) == NetAccessLevel::full &&
-              net_message_required_access(191) == NetAccessLevel::full,
-          "128..191 need full");
-    check(net_message_required_access(NET_MESSAGE_FIRST_SHARE) == NetAccessLevel::share &&
-              net_message_required_access(255) == NetAccessLevel::share,
-          "192..255 need share");
-    check(!net_access_allows(NetAccessLevel::share, NetAccessLevel::full), "share doesn't reach full messages");
-    check(!net_access_allows(NetAccessLevel::stream, NetAccessLevel::share), "stream doesn't reach share messages");
-    check(net_access_allows(NetAccessLevel::full, NetAccessLevel::share) &&
-              net_access_allows(NetAccessLevel::full, NetAccessLevel::gamepad),
-          "full includes every level below");
-    NetAccessLevel parsed = NetAccessLevel::gamepad;
-    check(net_access_level_parse("share", &parsed) && parsed == NetAccessLevel::share &&
-              std::strcmp(net_access_level_name(NetAccessLevel::share), "share") == 0,
-          "share by name");
-    check(net_access_level_parse("owner", &parsed) && parsed == NetAccessLevel::full,
-          "the old owner reads as full (it had everything)");
-    check(!net_access_level_parse("boss", &parsed) && parsed == NetAccessLevel::full, "unknown names refused");
+    NetDeviceInfo info;
+    net_device_info_set_name(&info, name);
+    info.kind = kind;
+    info.offers = offers;
+    info.uses = uses;
+    return info;
+}
 
-    uint8_t welcome[64] = {};
-    size_t size = net_message_write_welcome(welcome, sizeof(welcome), NetAccessLevel::share, "HOST");
-    NetAccessLevel told = NetAccessLevel::gamepad;
-    char host_name[64] = {};
-    check(size > 0 && net_message_read_welcome(welcome, size, &told, host_name) && told == NetAccessLevel::share,
-          "welcome carries owner");
-    welcome[1] = NET_ACCESS_LEVEL_COUNT;
-    check(!net_message_read_welcome(welcome, size, &told, host_name), "welcome with a level past owner refused");
+// Capabilities: independent bits, the message ranges, their names, the old
+// ladder's migration, and the messages that carry them.
+static void test_caps()
+{
+    check(net_message_required_cap(16) == NET_CAP_GAMEPAD && net_message_required_cap(63) == NET_CAP_GAMEPAD,
+          "16..63 need GAMEPAD");
+    check(net_message_required_cap(64) == NET_CAP_STREAM && net_message_required_cap(127) == NET_CAP_STREAM,
+          "64..127 need STREAM");
+    check(net_message_required_cap(128) == NET_CAP_SETTINGS && net_message_required_cap(191) == NET_CAP_SETTINGS,
+          "128..191 need SETTINGS");
+    check(net_message_required_cap(NET_MESSAGE_FIRST_SHARE) == NET_CAP_SHARE && net_message_required_cap(255) == NET_CAP_SHARE,
+          "192..255 need SHARE");
+    check(!net_caps_allow(NET_CAP_STREAM, 16), "STREAM doesn't imply GAMEPAD (independent bits)");
+    check(!net_caps_allow(NET_CAP_SETTINGS, NET_MESSAGE_FIRST_SHARE), "SETTINGS doesn't include SHARE");
+    check(net_caps_allow(NET_CAP_GAMEPAD | NET_CAP_SHARE, 200) && !net_caps_allow(NET_CAP_GAMEPAD | NET_CAP_SHARE, 130),
+          "a set allows exactly its bits");
+    check(net_caps_allow(NET_CAPS_ALL, 16) && net_caps_allow(NET_CAPS_ALL, 70) && net_caps_allow(NET_CAPS_ALL, 130) &&
+              net_caps_allow(NET_CAPS_ALL, 250),
+          "all four allow every range");
+
+    check(net_caps_name(NET_CAP_SHARE | NET_CAP_SETTINGS) == "settings,share", "names in bit order");
+    check(net_caps_name(0).empty(), "nothing is an empty list");
+    NetCaps parsed = 0;
+    check(net_caps_parse("share, gamepad", &parsed) && parsed == (NET_CAP_SHARE | NET_CAP_GAMEPAD), "a list parses");
+    check(net_caps_parse("", &parsed) && parsed == 0, "an empty list is nothing");
+    parsed = NET_CAP_STREAM;
+    check(!net_caps_parse("gamepad,boss", &parsed) && parsed == NET_CAP_STREAM, "an unknown name refuses the list");
+    NetCaps old = 0;
+    check(net_caps_from_level("gamepad", &old) && old == NET_CAP_GAMEPAD, "old gamepad: GAMEPAD");
+    check(net_caps_from_level("stream", &old) && old == (NET_CAP_GAMEPAD | NET_CAP_STREAM), "old stream: + GAMEPAD");
+    check(net_caps_from_level("share", &old) && old == (NET_CAP_GAMEPAD | NET_CAP_STREAM | NET_CAP_SHARE),
+          "old share: the levels below it + SHARE (not SETTINGS)");
+    check(net_caps_from_level("full", &old) && old == NET_CAPS_ALL, "old full: everything");
+    check(net_caps_from_level("owner", &old) && old == NET_CAPS_ALL, "old owner: everything");
+    check(!net_caps_from_level("boss", &old), "an unknown level isn't one");
+    NetDeviceKind kind = NetDeviceKind::piccolo;
+    check(net_device_kind_parse("piccolino", &kind) && kind == NetDeviceKind::piccolino &&
+              std::strcmp(net_device_kind_name(NetDeviceKind::piccoletto), "piccoletto") == 0,
+          "kinds by name");
+
+    NetDeviceInfo host = make_info("HOST", NetDeviceKind::piccolino, NET_CAP_SHARE | NET_CAP_SETTINGS, 0);
+    const char* record = "app=piccolino\nversion=0.4.0\n";
+    std::memcpy(host.record, record, std::strlen(record));
+    host.record_size = static_cast<uint16_t>(std::strlen(record));
+    host.signature_size = 3;
+    std::memcpy(host.signature, "sig", 3);
+    uint8_t message[NET_PAIR_MAX_MESSAGE] = {};
+    size_t size = net_message_write_welcome(message, sizeof(message), NET_CAP_SHARE, &host);
+    NetCaps told = 0;
+    NetDeviceInfo read;
+    check(size > 0 && net_message_read_welcome(message, size, &told, &read) && told == NET_CAP_SHARE &&
+              std::strcmp(read.name, "HOST") == 0 && read.kind == NetDeviceKind::piccolino &&
+              read.offers == (NET_CAP_SHARE | NET_CAP_SETTINGS) && read.record_size == host.record_size &&
+              std::memcmp(read.record, record, host.record_size) == 0 && read.signature_size == 3,
+          "welcome carries the caps and the host's info (build proof included)");
+    message[1] = 0x10;   // a bit past the four
+    check(!net_message_read_welcome(message, size, &told, &read), "welcome with an unknown bit refused");
+    size = net_message_write_hello(message, sizeof(message), &host);
+    check(size > 0 && net_message_read_hello(message, size, &read) && std::strcmp(read.name, "HOST") == 0, "hello round trip");
+    check(!net_message_read_hello(message, size - 1, &read), "hello cut short refused");
+    message[1 + 1 + 4] = 9;   // the kind byte, after the name
+    check(!net_message_read_hello(message, size, &read), "hello with an unknown kind refused");
+    size = net_message_write_grant(message, sizeof(message), NET_CAP_GAMEPAD | NET_CAP_STREAM);
+    check(size == 5 && net_message_read_grant(message, size, &told) && told == (NET_CAP_GAMEPAD | NET_CAP_STREAM),
+          "grant round trip");
+    check(net_message_write_pair_ask(message, sizeof(message)) == 1 && net_message_read_pair_ask(message, 1), "pair_ask");
 }
 
 static void test_discovery_packets()
@@ -112,6 +153,8 @@ static void test_discovery_packets()
 
     packet[5] = NET_DISCOVERY_VERSION + 1;
     check(!net_discovery_read_request(packet, size, &nonce), "other version refused");
+    packet[5] = 1;
+    check(!net_discovery_read_request(packet, size, &nonce), "an old request isn't answered");
     net_discovery_write_request(packet, sizeof(packet), 7);
     packet[0] = 'X';
     check(!net_discovery_read_request(packet, size, &nonce), "bad magic refused");
@@ -119,12 +162,32 @@ static void test_discovery_packets()
     NetDiscoveryReply reply;
     reply.nonce = 42;
     reply.port = 55420;
+    reply.kind = static_cast<uint8_t>(NetDeviceKind::piccolino);
+    reply.offers = NET_CAP_SHARE | NET_CAP_SETTINGS;
+    reply.signed_build = true;
     std::snprintf(reply.name, sizeof(reply.name), "Living room PC");
     size = net_discovery_write_reply(packet, sizeof(packet), &reply);
     NetDiscoveryReply read;
     check(size == NET_DISCOVERY_REPLY_HEADER_SIZE + std::strlen("Living room PC"), "reply size");
     check(net_discovery_read_reply(packet, size, &read), "reply round trip");
     check(read.nonce == 42 && read.port == 55420 && std::strcmp(read.name, "Living room PC") == 0, "reply fields");
+    check(read.version == 2 && read.kind == static_cast<uint8_t>(NetDeviceKind::piccolino) &&
+              read.offers == (NET_CAP_SHARE | NET_CAP_SETTINGS) && read.signed_build,
+          "v2 reply: kind, offers, signed");
+    // A version 1 reply (an older device): port and name only, still read.
+    uint8_t old[NET_DISCOVERY_MAX_PACKET];
+    std::memcpy(old, packet, 12);
+    old[5] = 1;
+    old[12] = 0x7C;
+    old[13] = 0xD8;   // 55420
+    old[14] = 3;
+    std::memcpy(old + 15, "Old", 3);
+    check(net_discovery_read_reply(old, 18, &read) && read.version == 1 && read.port == 55420 &&
+              std::strcmp(read.name, "Old") == 0 && read.offers == 0,
+          "v1 reply still read (no offers)");
+    packet[19] = 2;
+    check(!net_discovery_read_reply(packet, size, &read), "v2 reply with unknown flags refused");
+    packet[19] = 1;
     check(!net_discovery_read_request(packet, size, &nonce), "a reply is not a request");
     check(!net_discovery_read_reply(packet, size + 1, &read), "reply with a wrong length refused");
     packet[NET_DISCOVERY_REPLY_HEADER_SIZE + 3] = 0;
@@ -564,34 +627,45 @@ struct PairLoop
 {
     NetAccess host;
     NetClient client;
-    NetClientEvent client_event;   // the last interesting one
+    NetClientEvent client_event;   // the last outcome (ready / refused)
     bool client_got = false;
     NetAccessEventType host_last = NetAccessEventType::none;
     uint32_t host_events = 0;
     bool host_got_message = false;
     bool host_got_stream_message = false;
     bool client_got_message = false;
-    bool client_got_access = false;
+    bool client_got_caps = false;
     bool client_closed = false;
     bool client_unpaired = false;
     bool host_unpaired = false;
     std::string host_unpaired_name;
-    // The host's user, played by the test: answers pairing requests by
-    // reading the client's code (as off its screen), mistyping the first
-    // `host_mistypes`, at `host_level`; or refuses; or doesn't answer.
-    bool host_answers = true;
+    bool host_paired = false;
+    bool host_got_granted = false;
+    NetCaps host_granted = 0;
+    bool host_code_expired = false;
+    // The host's user, played by the test: sees each request's code (and may
+    // change the ticks, or refuse).
     bool host_refuses = false;
-    uint32_t host_mistypes = 0;
-    NetAccessLevel host_level = NetAccessLevel::gamepad;
+    bool host_sets_grants = false;
+    NetCaps host_grants = 0;
     uint32_t host_requests = 0;
     uint32_t host_retries = 0;
     NetAccessEvent host_request;     // the last pairing_requested
-    NetAccessLevel host_granted_back = NetAccessLevel::gamepad;
-    bool host_got_grant_back = false;
-    uint32_t client_code_changes = 0;
+    bool host_request_fresh = false; // its code not typed yet
+    // The client's user: types the code the host shows (the request's, or the
+    // shown one), mistyping the first `client_mistypes`; or doesn't type.
+    bool client_types = true;
+    uint32_t client_mistypes = 0;
+    uint32_t client_code_needed = 0;
+    uint32_t client_retries = 0;
+    NetClientEvent client_code_event;
 };
 
-static void wrong_code(const char* code, char* out);
+static void wrong_code(const char* code, char* out)
+{
+    std::snprintf(out, NET_PAIR_CODE_DIGITS + 1, "%s", code);
+    out[8] = out[8] == '9' ? '0' : static_cast<char>(out[8] + 1);   // the last digit: the slot stays
+}
 
 static void pair_pump(PairLoop* loop)
 {
@@ -605,31 +679,33 @@ static void pair_pump(PairLoop* loop)
             loop->host_requests++;
             loop->host_retries += host_event.retry ? 1 : 0;
             loop->host_request = host_event;
+            loop->host_request_fresh = true;
             if (loop->host_refuses)
             {
                 net_access_refuse_pairing(&loop->host, host_event.peer);
             }
-            else if (loop->host_answers)
+            else if (loop->host_sets_grants)
             {
-                char typed[NET_PAIR_CODE_DIGITS + 1];
-                std::snprintf(typed, sizeof(typed), "%s", loop->client.code);
-                if (loop->host_mistypes > 0)
-                {
-                    wrong_code(loop->client.code, typed);
-                    loop->host_mistypes--;
-                }
-                net_access_answer_pairing(&loop->host, host_event.peer, typed, loop->host_level);
+                net_access_set_pairing_grants(&loop->host, host_event.peer, loop->host_grants);
             }
         }
-        if (host_event.type == NetAccessEventType::granted_back)
+        if (host_event.type == NetAccessEventType::paired)
         {
-            loop->host_got_grant_back = true;
-            loop->host_granted_back = host_event.access;
+            loop->host_paired = true;
+        }
+        if (host_event.type == NetAccessEventType::granted)
+        {
+            loop->host_got_granted = true;
+            loop->host_granted = host_event.caps;
+        }
+        if (host_event.type == NetAccessEventType::code_expired)
+        {
+            loop->host_code_expired = true;
         }
         if (host_event.type == NetAccessEventType::unpaired)
         {
             loop->host_unpaired = true;
-            loop->host_unpaired_name = host_event.name;
+            loop->host_unpaired_name = host_event.info.name;
         }
         if (host_event.type == NetAccessEventType::message && host_event.channel == NetChannel::control &&
             host_event.size == 2 && host_event.data[0] == NET_MESSAGE_FIRST_STREAM)
@@ -655,17 +731,19 @@ static void pair_pump(PairLoop* loop)
         {
             loop->client_closed = true;
         }
-        else if (event.type == NetClientEventType::access)
+        else if (event.type == NetClientEventType::caps)
         {
-            loop->client_got_access = true;
+            loop->client_got_caps = true;
         }
         else if (event.type == NetClientEventType::unpaired)
         {
             loop->client_unpaired = true;
         }
-        else if (event.type == NetClientEventType::code_changed)
+        else if (event.type == NetClientEventType::code_needed)
         {
-            loop->client_code_changes++;   // still pairing: the outcome comes later
+            loop->client_code_needed++;
+            loop->client_retries += event.retry ? 1 : 0;
+            loop->client_code_event = event;
         }
         else
         {
@@ -673,14 +751,36 @@ static void pair_pump(PairLoop* loop)
             loop->client_got = true;
         }
     }
+    // The client's user types what the host's screen shows, once it's asked.
+    // (Like a person, only a code that's on the screen now: after a wrong one,
+    // the request's new code.)
+    if (loop->client_types && loop->client.state == NetClientState::code_wait &&
+        (loop->host.showing || loop->host_request_fresh))
+    {
+        const char* shown = loop->host.showing ? loop->host.shown_code : loop->host_request.code;
+        loop->host_request_fresh = false;
+        if (net_pair_code_valid(shown))
+        {
+            char typed[NET_PAIR_CODE_DIGITS + 1];
+            std::snprintf(typed, sizeof(typed), "%s", shown);
+            if (loop->client_mistypes > 0)
+            {
+                wrong_code(shown, typed);
+                loop->client_mistypes--;
+            }
+            net_client_enter_code(&loop->client, typed);
+        }
+    }
 }
 
-// Connects (with `code` or none) and waits for the client's outcome.
-static NetClientEvent pair_attempt(PairLoop* loop, NetAddress address, const char* code)
+// Connects and waits for the client's outcome.
+static NetClientEvent pair_attempt(PairLoop* loop, NetAddress address, bool pair)
 {
     loop->client_got = false;
     loop->client_event = {};
-    if (!net_client_connect(&loop->client, address, code))
+    loop->host_request = {};
+    loop->host_request_fresh = false;
+    if (!net_client_connect(&loop->client, address, pair))
     {
         check(false, "client connect started");
         return loop->client_event;
@@ -702,23 +802,101 @@ static void pump_for(PairLoop* loop, int milliseconds)
     }
 }
 
-static void wrong_code(const char* code, char* out)
+// Closes the client's connection and waits until both sides saw it close (a
+// new connection right away can meet the old one still closing).
+static void close_and_wait(PairLoop* loop)
 {
-    std::snprintf(out, NET_PAIR_CODE_DIGITS + 1, "%s", code);
-    out[8] = out[8] == '9' ? '0' : static_cast<char>(out[8] + 1);   // the last digit: the slot stays
+    loop->client_closed = false;
+    loop->host_last = NetAccessEventType::none;
+    net_client_close(&loop->client);
+    for (int i = 0; i < 300 && !(loop->client_closed && loop->host_last == NetAccessEventType::closed); i++)
+    {
+        pair_pump(loop);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    pump_for(loop, 100);
 }
 
-// A fresh code, as the client's PAIR window makes one.
-static const char* new_code(char* out)
+static void pump_while(PairLoop* loop, const bool* flag, bool want)
 {
-    net_pair_code_generate(out);
-    return out;
+    for (int i = 0; i < 200 && *flag != want; i++)
+    {
+        pair_pump(loop);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+// The build check the frontend provides: a record reading "signed" passes.
+static bool test_verify_build(void* user, const NetDeviceInfo* info)
+{
+    (void)user;
+    return info->record_size == 6 && std::memcmp(info->record, "signed", 6) == 0;
+}
+
+static NetTrustedDevice* host_record(PairLoop* loop, uint32_t index)
+{
+    return index < loop->host.trust.devices.size() ? &loop->host.trust.devices[index] : nullptr;
+}
+
+static void test_trust_files(const char* folder)
+{
+    // Old lists migrate: the ladder's names become the sets they covered.
+    std::string old_list = std::string(folder) + "/old_devices.cfg";
+    const char* old_text = "[device:0101010101010101010101010101010101010101010101010101010101010101]\nname = A\nown = true\n"
+                           "[device:0202020202020202020202020202020202020202020202020202020202020202]\nname = B\n"
+                           "[device:0303030303030303030303030303030303030303030303030303030303030303]\nname = C\naccess = share\n"
+                           "[device:0404040404040404040404040404040404040404040404040404040404040404]\nname = D\naccess = stream\n";
+    host_fs_write_file(old_list.c_str(), old_text, std::strlen(old_text));
+    NetTrust old_trust;
+    net_trust_load(&old_trust, old_list.c_str());
+    check(old_trust.devices.size() == 4 && old_trust.devices[0].grants == NET_CAPS_ALL &&
+              old_trust.devices[1].grants == 0 &&
+              old_trust.devices[2].grants == (NET_CAP_GAMEPAD | NET_CAP_STREAM | NET_CAP_SHARE) &&
+              old_trust.devices[3].grants == (NET_CAP_GAMEPAD | NET_CAP_STREAM),
+          "old lists migrate: own -> all, nothing -> nothing, share and stream -> what they covered");
+    check(net_trust_save(&old_trust, old_list.c_str()), "a migrated list saves");
+    NetTrust saved;
+    net_trust_load(&saved, old_list.c_str());
+    check(saved.devices.size() == 4 && saved.devices[2].grants == (NET_CAP_GAMEPAD | NET_CAP_STREAM | NET_CAP_SHARE),
+          "and reads back as grants");
+    std::string text;
+    uint8_t* bytes = nullptr;
+    size_t byte_count = 0;
+    if (host_fs_read_file(old_list.c_str(), &bytes, &byte_count))
+    {
+        text.assign(reinterpret_cast<const char*>(bytes), byte_count);
+        delete[] bytes;
+    }
+    check(text.find("access") == std::string::npos && text.find("grants = gamepad,stream,share") != std::string::npos,
+          "saved with grants, no access key");
+
+    // One record per device: the old hosts list merges in, then is renamed.
+    std::string devices = std::string(folder) + "/merge_devices.cfg";
+    std::string hosts = std::string(folder) + "/merge_hosts.cfg";
+    const char* devices_text = "[device:0101010101010101010101010101010101010101010101010101010101010101]\nname = A\n"
+                               "grants = gamepad\n";
+    const char* hosts_text = "[device:0101010101010101010101010101010101010101010101010101010101010101]\nname = A\n"
+                             "access = gamepad\n"
+                             "[device:0505050505050505050505050505050505050505050505050505050505050505]\nname = E\n"
+                             "access = gamepad\n";
+    host_fs_write_file(devices.c_str(), devices_text, std::strlen(devices_text));
+    host_fs_write_file(hosts.c_str(), hosts_text, std::strlen(hosts_text));
+    std::remove((hosts + ".old").c_str());
+    NetTrust merged;
+    net_trust_load(&merged, devices.c_str());
+    check(net_trust_merge_old_hosts(&merged, devices.c_str(), hosts.c_str()), "the old hosts list merges");
+    check(merged.devices.size() == 2 && merged.devices[0].grants == NET_CAP_GAMEPAD && merged.devices[1].name == "E" &&
+              merged.devices[1].grants == 0,
+          "a device in both keeps its record; a host only we went to may use nothing here");
+    check(!host_fs_exists(hosts.c_str()) && host_fs_exists((hosts + ".old").c_str()), "the old file is renamed .old");
+    net_trust_load(&saved, devices.c_str());
+    check(saved.devices.size() == 2, "the merged list is saved");
 }
 
 static void test_pairing(const char* folder)
 {
     std::string host_trust = std::string(folder) + "/host_devices.cfg";
-    std::string client_trust = std::string(folder) + "/client_hosts.cfg";
+    std::string client_trust = std::string(folder) + "/client_devices.cfg";
     std::string identity_path = std::string(folder) + "/identity.cfg";
     std::remove(host_trust.c_str());
     std::remove(client_trust.c_str());
@@ -732,183 +910,185 @@ static void test_pairing(const char* folder)
     check(std::memcmp(host_key.public_key, again.public_key, NET_KEY_SIZE) == 0, "the same identity comes back");
     net_keypair_generate(&client_key);
 
+    // A piccolo (offers everything, uses FILE TRANSFER and SETTINGS) and a
+    // piccoletto (offers nothing, uses GAMEPAD, STREAM and SETTINGS).
+    NetDeviceInfo host_info = make_info("Living room", NetDeviceKind::piccolo, NET_CAPS_ALL,
+                                        NET_CAP_SHARE | NET_CAP_SETTINGS);
+    NetDeviceInfo client_info = make_info("Ana's phone", NetDeviceKind::piccoletto, 0,
+                                          NET_CAP_GAMEPAD | NET_CAP_STREAM | NET_CAP_SETTINGS);
     PairLoop* loop = new PairLoop();
-    check(net_access_create(&loop->host, 0, "Living room", &host_key, host_trust.c_str()), "access host created");
-    check(net_client_create(&loop->client, &client_key, "Ana's phone", client_trust.c_str()), "client created");
+    check(net_access_create(&loop->host, 0, &host_info, &host_key, host_trust.c_str()), "access host created");
+    check(net_client_create(&loop->client, &client_key, &client_info, client_trust.c_str()), "client created");
+    net_access_set_verify_build(&loop->host, test_verify_build, nullptr);
+    net_client_set_verify_build(&loop->client, test_verify_build, nullptr);
     NetAddress address;
     net_address_from_text("127.0.0.1", net_host_port(&loop->host.session.host), &address);
 
-    NetClientEvent result = pair_attempt(loop, address, nullptr);
+    NetClientEvent result = pair_attempt(loop, address, false);
     check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::not_paired,
-          "not paired, no code: refused (not_paired)");
-    char code[NET_PAIR_CODE_DIGITS + 1];
-    check(net_pair_code_valid(new_code(code)) && std::strlen(code) == 9, "the code is 9 digits");
+          "not paired, not asking: refused (not_paired)");
 
     // The host's user refuses: refused, and that device isn't asked about again.
     loop->host_refuses = true;
-    result = pair_attempt(loop, address, code);
+    result = pair_attempt(loop, address, true);
     check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::refused,
           "the host refuses: refused (refused)");
-    check(loop->host_requests == 1 && std::strcmp(loop->host_request.name, "Ana's phone") == 0,
-          "the host saw the request with the client's name");
-    result = pair_attempt(loop, address, new_code(code));
+    check(loop->host_requests == 1 && std::strcmp(loop->host_request.info.name, "Ana's phone") == 0 &&
+              loop->host_request.info.kind == NetDeviceKind::piccoletto && net_pair_code_valid(loop->host_request.code),
+          "the host saw the request: the device's name and kind, and a code of its own to show");
+    result = pair_attempt(loop, address, true);
     check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::pairing_closed &&
               loop->host_requests == 1,
           "refused once: not asked again (pairing_closed)");
     loop->host_refuses = false;
     loop->host.refused_keys.clear();   // as a new NetAccess (restart) would be
 
-    // Nobody types: the client waits, nothing happens on its own.
-    loop->host_answers = false;
+    // Nobody types: the request waits, with the default ticks; going away closes it.
+    loop->client_types = false;
     loop->client_got = false;
-    check(net_client_connect(&loop->client, address, new_code(code)), "connect with a code");
-    net_client_set_pairing(&loop->client, NetAccessLevel::share, NetPairKind::piccolo);
+    loop->client_code_needed = 0;
+    check(net_client_connect(&loop->client, address, true), "connect to pair");
     pump_for(loop, 400);
-    check(!loop->client_got && loop->host_request.access == NetAccessLevel::share,
-          "the request waits for the host's user (asking for the level it was set to)");
+    check(!loop->client_got && loop->client_code_needed == 1 &&
+              std::strcmp(loop->client_code_event.host.name, "Living room") == 0,
+          "the client is asked for the code, with the host's name to show");
+    check(loop->host_request.caps == (NET_CAP_GAMEPAD | NET_CAP_STREAM),
+          "default ticks: what it uses and we offer, without SETTINGS for an unsigned build");
+    check(!loop->host_request.signed_build, "an unsigned build is reported unsigned");
     net_client_close(&loop->client);
     pump_for(loop, 200);
     check(loop->host_last == NetAccessEventType::closed, "a request that goes: closed (the dialog closes)");
-    loop->host_answers = true;
+    loop->client_types = true;
 
-    // Mistyped twice, then right: the client makes new codes, the same
-    // connection pairs, at the level the host's user picked.
-    loop->host_mistypes = 2;
+    // Mistyped twice, then right: the host makes a new code each time; the
+    // same connection pairs, with the ticks the host's user set.
+    loop->client_mistypes = 2;
     loop->host_requests = 0;
     loop->host_retries = 0;
-    loop->client_code_changes = 0;
-    net_client_set_pairing(&loop->client, NetAccessLevel::share, NetPairKind::piccoletto);
-    result = pair_attempt(loop, address, new_code(code));
+    loop->client_retries = 0;
+    loop->host_sets_grants = true;
+    loop->host_grants = NET_CAP_GAMEPAD | NET_CAP_SETTINGS | NET_CAP_SHARE;   // SHARE: not something it uses
+    result = pair_attempt(loop, address, true);
     check(result.type == NetClientEventType::ready && result.newly_paired, "right code at the third try: paired");
-    check(result.access == NetAccessLevel::gamepad && loop->client.access == NetAccessLevel::gamepad,
-          "paired at the level the host's user picked, not the one asked for (share)");
-    check(loop->client_code_changes == 2 && loop->host_retries == 2 && loop->host_requests == 3,
-          "two wrong codes: two new codes, two retries on the host");
-    check(loop->host_request.access == NetAccessLevel::share && loop->host_request.kind == NetPairKind::piccoletto,
-          "the request says what it wants and what it is");
+    check(loop->host_retries == 2 && loop->host_requests == 3 && loop->client_retries == 2,
+          "two wrong codes: two new codes on the host, the client asked twice more");
+    check(result.caps == (NET_CAP_GAMEPAD | NET_CAP_SETTINGS) && loop->client.caps == result.caps,
+          "the client may use what the host's user ticked, kept to what it uses");
+    check(std::strcmp(result.host.name, "Living room") == 0 && result.host.kind == NetDeviceKind::piccolo &&
+              result.host.offers == NET_CAPS_ALL,
+          "the client knows the host's name, kind and offers");
     pump_for(loop, 100);
-    check(loop->host_last == NetAccessEventType::paired || loop->host_events > 0, "host reported the new device");
-    check(loop->host.trust.devices.size() == 1 && loop->host.trust.devices[0].name == "Ana's phone" &&
-              loop->host.trust.devices[0].access == NetAccessLevel::gamepad,
-          "host trusts the client by name, at the level its user picked (not the one asked for)");
-    check(!loop->client_got_access && loop->client.access == NetAccessLevel::gamepad,
-          "the client is told that level when paired (no separate access event)");
-    check(std::memcmp(loop->host.trust.devices[0].key, client_key.public_key, NET_KEY_SIZE) == 0,
+    check(loop->host_paired, "host reported the new device");
+    NetTrustedDevice* record = host_record(loop, 0);
+    check(loop->host.trust.devices.size() == 1 && record != nullptr && record->name == "Ana's phone" &&
+              record->kind == NetDeviceKind::piccoletto && record->grants == (NET_CAP_GAMEPAD | NET_CAP_SETTINGS),
+          "host keeps the device: name, kind, grants");
+    check(record != nullptr && std::memcmp(record->key, client_key.public_key, NET_KEY_SIZE) == 0,
           "host trusts the client's key");
-    check(loop->client.trust.devices.size() == 1 && loop->client.trust.devices[0].name == "Living room",
-          "client trusts the host");
+    check(loop->client.trust.devices.size() == 1 && loop->client.trust.devices[0].name == "Living room" &&
+              loop->client.trust.devices[0].granted == (NET_CAP_GAMEPAD | NET_CAP_SETTINGS) &&
+              loop->client.trust.devices[0].grants == 0,
+          "client keeps the host: what it was granted, nothing granted back yet");
+    loop->host_sets_grants = false;
 
-    // Access back, once, right after pairing.
-    check(net_client_grant_back(&loop->client, NetAccessLevel::share), "grant_back sent");
-    pump_for(loop, 200);
-    check(loop->host_got_grant_back && loop->host_granted_back == NetAccessLevel::share, "the host got it");
-    check(!net_client_grant_back(&loop->client, NetAccessLevel::full), "only once");
+    // The client's last screen: what the host may use on it, told at once.
+    net_client_set_grants(&loop->client, 0, NET_CAP_SHARE);
+    pump_while(loop, &loop->host_got_granted, true);
+    check(loop->host_got_granted && loop->host_granted == NET_CAP_SHARE, "the host is told what it may use there");
+    check(host_record(loop, 0) != nullptr && host_record(loop, 0)->granted == NET_CAP_SHARE,
+          "and keeps it in the same record");
     NetTrust saved;
     net_trust_load(&saved, host_trust.c_str());
-    check(saved.devices.size() == 1 && std::memcmp(saved.devices[0].key, client_key.public_key, NET_KEY_SIZE) == 0,
-          "the host's list is on disk");
-    loop->client_got_access = false;
+    check(saved.devices.size() == 1 && saved.devices[0].granted == NET_CAP_SHARE &&
+              saved.devices[0].grants == (NET_CAP_GAMEPAD | NET_CAP_SETTINGS),
+          "both directions on disk, one record");
 
     const uint8_t hello[] = {NET_MESSAGE_FIRST_APP, 'x'};
     check(net_client_send(&loop->client, NetChannel::control, hello, sizeof(hello)), "app message sent");
-    for (int i = 0; i < 200 && !loop->client_got_message; i++)
-    {
-        pair_pump(loop);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    pump_while(loop, &loop->client_got_message, true);
     check(loop->host_got_message && loop->client_got_message, "app messages both ways");
     const uint8_t sneaky[] = {static_cast<uint8_t>(NetMessage::welcome), 0};
     check(!net_client_send(&loop->client, NetChannel::control, sneaky, sizeof(sneaky)),
           "the app can't send pairing messages");
 
-    // Reconnecting under a new name: the host's list follows it.
+    // Reconnecting under a new name: the host's record follows it.
     net_client_close(&loop->client);
     pump_for(loop, 200);
-    loop->client.name = "ANA'S NEW PHONE";
-    result = pair_attempt(loop, address, nullptr);
-    check(result.type == NetClientEventType::ready && !result.newly_paired, "paired device welcomed without a code");
-    check(result.access == NetAccessLevel::gamepad, "welcomed at the level it was given");
+    net_device_info_set_name(&loop->client.info, "ANA'S NEW PHONE");
+    loop->host_got_granted = false;
+    result = pair_attempt(loop, address, false);
+    check(result.type == NetClientEventType::ready && !result.newly_paired, "paired device welcomed without pairing");
+    check(result.caps == (NET_CAP_GAMEPAD | NET_CAP_SETTINGS), "welcomed with what it was given");
     pump_for(loop, 100);
-    check(loop->host.trust.devices[0].name == "ANA'S NEW PHONE", "the device's new name replaces the old one");
-    net_trust_load(&saved, host_trust.c_str());
-    check(saved.devices.size() == 1 && saved.devices[0].name == "ANA'S NEW PHONE", "and is saved");
+    check(host_record(loop, 0) != nullptr && host_record(loop, 0)->name == "ANA'S NEW PHONE",
+          "the device's new name replaces the old one");
+    check(loop->host_got_granted && loop->host_granted == NET_CAP_SHARE, "its grant comes again at every connection");
 
-    // Access: a stream-level message from a gamepad-level device is dropped.
+    // A STREAM message without STREAM is dropped; given it, it goes through.
     const uint8_t stream_message[] = {NET_MESSAGE_FIRST_STREAM, 's'};
     check(net_client_send(&loop->client, NetChannel::control, stream_message, sizeof(stream_message)),
           "stream message sent");
     pump_for(loop, 200);
-    check(!loop->host_got_stream_message && loop->host.dropped_by_access == 1, "gamepad level: stream message dropped");
-
-    net_access_set_level(&loop->host, 0, NetAccessLevel::full);
-    for (int i = 0; i < 200 && !loop->client_got_access; i++)
-    {
-        pair_pump(loop);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    check(loop->client_got_access && loop->client.access == NetAccessLevel::full, "the client is told its new level");
+    check(!loop->host_got_stream_message && loop->host.dropped_by_access == 1, "no STREAM: stream message dropped");
+    loop->client_got_caps = false;
+    net_access_set_grants(&loop->host, 0, NET_CAPS_ALL);
+    pump_while(loop, &loop->client_got_caps, true);
+    check(loop->client_got_caps && loop->client.caps == (NET_CAP_GAMEPAD | NET_CAP_STREAM | NET_CAP_SETTINGS),
+          "the client is told: everything granted, kept to what it uses (no SHARE)");
     net_client_send(&loop->client, NetChannel::control, stream_message, sizeof(stream_message));
-    for (int i = 0; i < 200 && !loop->host_got_stream_message; i++)
-    {
-        pair_pump(loop);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    check(loop->host_got_stream_message, "full level: stream message delivered");
+    pump_while(loop, &loop->host_got_stream_message, true);
+    check(loop->host_got_stream_message, "with STREAM: stream message delivered");
     net_trust_load(&saved, host_trust.c_str());
-    check(saved.devices.size() == 1 && saved.devices[0].access == NetAccessLevel::full, "access level saved");
-    net_access_set_level(&loop->host, 0, NetAccessLevel::share);
-    net_trust_load(&saved, host_trust.c_str());
-    check(saved.devices.size() == 1 && saved.devices[0].access == NetAccessLevel::share, "owner saved");
-    net_access_set_level(&loop->host, 0, NetAccessLevel::full);
-    pump_for(loop, 100);
+    check(saved.devices.size() == 1 && saved.devices[0].grants == NET_CAPS_ALL, "grants saved");
 
-    // A list from before access: own = true reads as full, nothing as gamepad.
-    std::string old_list = std::string(folder) + "/old_devices.cfg";
-    const char* old_text = "[device:0101010101010101010101010101010101010101010101010101010101010101]\nname = A\nown = true\n"
-                           "[device:0202020202020202020202020202020202020202020202020202020202020202]\nname = B\n";
-    host_fs_write_file(old_list.c_str(), old_text, std::strlen(old_text));
-    NetTrust old_trust;
-    net_trust_load(&old_trust, old_list.c_str());
-    check(old_trust.devices.size() == 2 && old_trust.devices[0].access == NetAccessLevel::full &&
-              old_trust.devices[1].access == NetAccessLevel::gamepad,
-          "old lists migrate: own = true -> full");
-
-    loop->client_closed = false;   // set by the close above
+    loop->client_closed = false;
     net_access_remove_device(&loop->host, 0);
-    for (int i = 0; i < 200 && !loop->client_closed; i++)
-    {
-        pair_pump(loop);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    pump_while(loop, &loop->client_closed, true);
     check(loop->client_closed, "removing the device closes its connection");
     check(loop->client_unpaired && loop->client.trust.devices.empty(),
           "a connected device is told: it forgets the host too");
     pump_for(loop, 100);
     check(loop->host_last == NetAccessEventType::closed, "and the host reports it closed (its pads can go)");
-    result = pair_attempt(loop, address, nullptr);
+    result = pair_attempt(loop, address, false);
     check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::not_paired,
           "a removed device is refused");
 
     // A host that knows our key but whose key we don't know (an impostor
     // that copied the list, say): refused even though it welcomes us.
-    loop->client.trust.devices.clear();
-    net_trust_add(&loop->host.trust, client_key.public_key, "Ana's phone");
-    result = pair_attempt(loop, address, nullptr);
+    NetTrust impostor;
+    net_trust_add(&impostor, client_key.public_key, "Ana's phone");
+    impostor.devices[0].grants = NET_CAP_GAMEPAD;
+    net_trust_save(&impostor, host_trust.c_str());
+    result = pair_attempt(loop, address, false);
     check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::unknown_host,
           "unknown host refused");
-    net_trust_remove(&loop->host.trust, 0);
+    // Its connection closes first (the client closes it): both sides closing
+    // at once leaves ENet peers stuck until they time out.
+    pump_for(loop, 300);
+    impostor.devices.clear();
+    net_trust_save(&impostor, host_trust.c_str());
+    pump_for(loop, 50);
 
-    // Unpairing from the client, connected: the host forgets it too. (Paired
-    // at STREAM while asking for GAMEPAD: the ready event says STREAM.)
-    loop->host_level = NetAccessLevel::stream;
-    net_client_set_pairing(&loop->client, NetAccessLevel::gamepad, NetPairKind::piccoletto);
-    result = pair_attempt(loop, address, new_code(code));
-    check(result.type == NetClientEventType::ready && result.newly_paired, "paired again");
-    check(result.access == NetAccessLevel::stream, "given STREAM, asked for GAMEPAD: STREAM when paired");
-    loop->host_level = NetAccessLevel::gamepad;
+    // GENERATE PAIRING CODE: the host shows a code first; the client types it
+    // and pairs with no request, granted the shown ticks ∩ what it uses.
+    char shown[NET_PAIR_CODE_DIGITS + 1];
+    check(net_access_show_code(&loop->host, NET_CAPS_ALL, shown) && net_pair_code_valid(shown), "a code is shown");
+    loop->host_requests = 0;
+    result = pair_attempt(loop, address, true);
+    check(result.type == NetClientEventType::ready && result.newly_paired, "the shown code pairs");
+    check(loop->host_requests == 0, "no request dialog: the user already sees the code");
+    check(!loop->host.showing, "one code, one device: it ends once a device paired with it");
+    check(result.caps == (NET_CAP_GAMEPAD | NET_CAP_STREAM),
+          "shown ticks ∩ what it uses, FILE TRANSFER and SETTINGS off for an unsigned build");
+    close_and_wait(loop);
+
+    // Unpairing from the client, connected: the host forgets it too.
+    result = pair_attempt(loop, address, false);
+    check(result.type == NetClientEventType::ready, "reconnected");
     pump_for(loop, 100);
     check(loop->host.trust.devices.size() == 1 && loop->client.trust.devices.size() == 1, "both lists have it");
     loop->client_closed = false;
+    loop->host_unpaired = false;
     check(net_client_unpair(&loop->client, 0), "client unpairs");
     check(loop->client.trust.devices.empty(), "the client forgot the host at once");
     for (int i = 0; i < 200 && !(loop->host_unpaired && loop->host_last == NetAccessEventType::closed); i++)
@@ -920,26 +1100,38 @@ static void test_pairing(const char* folder)
     check(loop->host.trust.devices.empty(), "and forgets it");
     net_trust_load(&saved, host_trust.c_str());
     check(saved.devices.empty(), "the host's list on disk too");
-    check(loop->host_last == NetAccessEventType::closed, "the connection closed (the client closes it)");
 
-    // Unpairing from the client, not connected: only its own list.
-    result = pair_attempt(loop, address, new_code(code));
-    check(result.type == NetClientEventType::ready, "paired once more");
+    // A signed build: SETTINGS is ticked by default (only FILE TRANSFER is
+    // what it doesn't use).
+    const char* proof = "signed";
+    std::memcpy(loop->client.info.record, proof, 6);
+    loop->client.info.record_size = 6;
+    loop->client_types = false;
+    loop->host_request = {};
+    check(net_client_connect(&loop->client, address, true), "a signed build asks");
+    pump_for(loop, 300);
+    check(loop->host_request.signed_build && loop->host_request.caps == (NET_CAP_GAMEPAD | NET_CAP_STREAM | NET_CAP_SETTINGS),
+          "a signed build: reported signed, SETTINGS ticked by default");
     net_client_close(&loop->client);
     pump_for(loop, 200);
-    loop->host_unpaired = false;
-    check(net_client_unpair(&loop->client, 0) && loop->client.trust.devices.empty(), "offline: forgotten here");
-    pump_for(loop, 100);
-    check(!loop->host_unpaired && loop->host.trust.devices.size() == 1, "offline: the host still has it");
-    check(!net_client_unpair(&loop->client, 0), "no such host: false");
-    net_trust_remove(&loop->host.trust, 0);
+    loop->client_types = true;
+    loop->client.info.record_size = 0;
 
     // Five wrong codes on one connection: refused (wrong_code).
-    loop->host_mistypes = NET_PAIRING_MAX_FAILURES;
-    result = pair_attempt(loop, address, new_code(code));
+    loop->client_mistypes = NET_PAIRING_MAX_FAILURES;
+    result = pair_attempt(loop, address, true);
     check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::wrong_code,
           "five wrong codes: refused (wrong_code)");
-    loop->host_mistypes = 0;
+    loop->client_mistypes = 0;
+    pump_for(loop, 200);
+
+    // The shown code's time runs out (5 minutes): it's gone.
+    loop->host_code_expired = false;
+    check(net_access_show_code(&loop->host, NET_CAP_GAMEPAD, shown), "another code shown");
+    loop->host.shown_since -= NET_ACCESS_REQUEST_SECONDS + 1.0;
+    pump_while(loop, &loop->host_code_expired, true);
+    check(loop->host_code_expired && !loop->host.showing, "the shown code expires after 5 minutes");
+    check(NET_ACCESS_REQUEST_SECONDS == 300.0, "requests and shown codes wait 5 minutes");
 
     net_client_destroy(&loop->client);
     net_access_destroy(&loop->host);
@@ -948,7 +1140,7 @@ static void test_pairing(const char* folder)
 
 int main(int argc, char** argv)
 {
-    test_access_levels();
+    test_caps();
     test_discovery_packets();
     if (!net_init())
     {
@@ -962,6 +1154,7 @@ int main(int argc, char** argv)
     if (argc > 1)
     {
         host_fs_make_directories(argv[1]);
+        test_trust_files(argv[1]);
         test_pairing(argv[1]);
     }
     else

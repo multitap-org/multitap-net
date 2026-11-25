@@ -2,7 +2,9 @@
 
 #include <cstdio>
 #include <cstring>
+#include <atomic>
 #include <ctime>
+#include <mutex>
 
 #include "host_fs.h"
 #include "host_log.h"
@@ -11,35 +13,130 @@
 
 static constexpr const char* DEVICE_PREFIX = "device:";
 
-const char* net_access_level_name(NetAccessLevel level)
+// net_trust_file_lock: one paired-devices file per process, written by both
+// sides of the device (see net_trust.h).
+static std::mutex trust_file_mutex;
+static std::atomic<uint32_t> trust_generation{1};
+
+void net_trust_file_lock()
 {
-    switch (level)
-    {
-    case NetAccessLevel::gamepad:
-        return "gamepad";
-    case NetAccessLevel::stream:
-        return "stream";
-    case NetAccessLevel::share:
-        return "share";
-    case NetAccessLevel::full:
-        return "full";
-    }
-    return "gamepad";
+    trust_file_mutex.lock();
 }
 
-bool net_access_level_parse(const char* name, NetAccessLevel* level)
+void net_trust_file_unlock()
 {
-    if (std::strcmp(name, "owner") == 0)
+    trust_file_mutex.unlock();
+}
+
+uint32_t net_trust_generation()
+{
+    return trust_generation.load();
+}
+
+static constexpr const char* CAP_NAMES[NET_CAP_COUNT] = {"gamepad", "stream", "settings", "share"};
+static constexpr const char* KIND_NAMES[NET_DEVICE_KIND_COUNT] = {"piccolo", "piccoletto", "piccolino"};
+
+std::string net_caps_name(NetCaps caps)
+{
+    std::string out;
+    for (uint32_t i = 0; i < NET_CAP_COUNT; i++)
     {
-        *level = NetAccessLevel::full;   // the old top level keeps everything it had
+        if ((caps & (1u << i)) == 0)
+        {
+            continue;
+        }
+        if (!out.empty())
+        {
+            out += ",";
+        }
+        out += CAP_NAMES[i];
+    }
+    return out;
+}
+
+static bool is_list_space(char c)
+{
+    return c == ' ' || c == '\t';
+}
+
+bool net_caps_parse(const char* text, NetCaps* caps)
+{
+    NetCaps result = 0;
+    const char* at = text;
+    while (*at != '\0')
+    {
+        while (is_list_space(*at) || *at == ',')
+        {
+            at++;
+        }
+        const char* start = at;
+        while (*at != '\0' && *at != ',' && !is_list_space(*at))
+        {
+            at++;
+        }
+        size_t length = static_cast<size_t>(at - start);
+        if (length == 0)
+        {
+            continue;
+        }
+        bool known = false;
+        for (uint32_t i = 0; i < NET_CAP_COUNT; i++)
+        {
+            if (std::strlen(CAP_NAMES[i]) == length && std::strncmp(CAP_NAMES[i], start, length) == 0)
+            {
+                result |= 1u << i;
+                known = true;
+                break;
+            }
+        }
+        if (!known)
+        {
+            return false;
+        }
+    }
+    *caps = result;
+    return true;
+}
+
+bool net_caps_from_level(const char* level, NetCaps* caps)
+{
+    if (std::strcmp(level, "gamepad") == 0)
+    {
+        *caps = NET_CAP_GAMEPAD;
         return true;
     }
-    for (uint32_t i = 0; i < NET_ACCESS_LEVEL_COUNT; i++)
+    if (std::strcmp(level, "stream") == 0)
     {
-        NetAccessLevel candidate = static_cast<NetAccessLevel>(i);
-        if (std::strcmp(name, net_access_level_name(candidate)) == 0)
+        *caps = NET_CAP_GAMEPAD | NET_CAP_STREAM;
+        return true;
+    }
+    if (std::strcmp(level, "share") == 0)
+    {
+        // The old ladder ranked share above stream and below full.
+        *caps = NET_CAP_GAMEPAD | NET_CAP_STREAM | NET_CAP_SHARE;
+        return true;
+    }
+    if (std::strcmp(level, "full") == 0 || std::strcmp(level, "owner") == 0)
+    {
+        *caps = NET_CAPS_ALL;
+        return true;
+    }
+    return false;
+}
+
+const char* net_device_kind_name(NetDeviceKind kind)
+{
+    uint32_t index = static_cast<uint32_t>(kind);
+    return index < NET_DEVICE_KIND_COUNT ? KIND_NAMES[index] : KIND_NAMES[0];
+}
+
+bool net_device_kind_parse(const char* name, NetDeviceKind* kind)
+{
+    for (uint32_t i = 0; i < NET_DEVICE_KIND_COUNT; i++)
+    {
+        if (std::strcmp(name, KIND_NAMES[i]) == 0)
         {
-            *level = candidate;
+            *kind = static_cast<NetDeviceKind>(i);
             return true;
         }
     }
@@ -142,13 +239,9 @@ bool net_identity_load_or_create(const char* path, NetKeypair* identity)
     return true;
 }
 
-bool net_trust_load(NetTrust* trust, const char* path)
+// One file's devices, appended to `devices` (no duplicates check: callers do that).
+static bool load_devices(const char* path, std::vector<NetTrustedDevice>* devices)
 {
-    trust->devices.clear();
-    if (!host_fs_exists(path))
-    {
-        return true;
-    }
     SettingsFile file;
     if (!settings_file_load(&file, path))
     {
@@ -157,31 +250,70 @@ bool net_trust_load(NetTrust* trust, const char* path)
     size_t prefix_length = std::strlen(DEVICE_PREFIX);
     for (size_t i = 0; i < file.sections.size(); i++)
     {
-        const std::string* section = &file.sections[i].name;
-        if (section->compare(0, prefix_length, DEVICE_PREFIX) != 0)
+        const char* section = file.sections[i].name.c_str();
+        if (std::strncmp(section, DEVICE_PREFIX, prefix_length) != 0)
         {
             continue;
         }
         NetTrustedDevice device;
-        if (!net_hex_to_bytes(section->c_str() + prefix_length, device.key, NET_KEY_SIZE))
+        if (!net_hex_to_bytes(section + prefix_length, device.key, NET_KEY_SIZE))
         {
-            host_log(LogLevel::warning, "Network: %s: [%s] is not a device key, skipped", path, section->c_str());
+            host_log(LogLevel::warning, "Network: %s: [%s] is not a device key, skipped", path, section);
             continue;
         }
-        const char* name = settings_file_get(&file, section->c_str(), "name");
-        const char* access = settings_file_get(&file, section->c_str(), "access");
-        const char* own = settings_file_get(&file, section->c_str(), "own");   // before access existed
-        const char* paired = settings_file_get(&file, section->c_str(), "paired");
+        const char* name = settings_file_get(&file, section, "name");
+        const char* kind = settings_file_get(&file, section, "kind");
+        const char* grants = settings_file_get(&file, section, "grants");
+        const char* granted = settings_file_get(&file, section, "granted");
+        const char* signed_build = settings_file_get(&file, section, "signed");
+        const char* access = settings_file_get(&file, section, "access");   // the ladder, before 2026-11-25
+        const char* own = settings_file_get(&file, section, "own");         // before access existed
+        const char* paired = settings_file_get(&file, section, "paired");
         device.name = name != nullptr ? name : "";
-        if (access == nullptr || !net_access_level_parse(access, &device.access))
+        if (kind != nullptr && !net_device_kind_parse(kind, &device.kind))
         {
-            // Unknown or missing: the least, except an old "own" device.
-            device.access = own != nullptr && std::strcmp(own, "true") == 0 ? NetAccessLevel::full : NetAccessLevel::gamepad;
+            device.kind = NetDeviceKind::piccolo;
         }
+        if (grants != nullptr)
+        {
+            if (!net_caps_parse(grants, &device.grants))
+            {
+                // Unknown names (a newer build's capability, say): the safe side.
+                host_log(LogLevel::warning, "Network: %s: [%s] grants \"%s\" unreadable, read as nothing", path,
+                         section, grants);
+                device.grants = 0;
+            }
+        }
+        else if (access != nullptr)
+        {
+            if (!net_caps_from_level(access, &device.grants))
+            {
+                device.grants = 0;
+            }
+        }
+        else if (own != nullptr && std::strcmp(own, "true") == 0)
+        {
+            device.grants = NET_CAPS_ALL;
+        }
+        if (granted != nullptr && !net_caps_parse(granted, &device.granted))
+        {
+            device.granted = 0;
+        }
+        device.signed_build = signed_build != nullptr && std::strcmp(signed_build, "true") == 0;
         device.paired = paired != nullptr ? paired : "";
-        trust->devices.push_back(device);
+        devices->push_back(device);
     }
     return true;
+}
+
+bool net_trust_load(NetTrust* trust, const char* path)
+{
+    trust->devices.clear();
+    if (!host_fs_exists(path))
+    {
+        return true;
+    }
+    return load_devices(path, &trust->devices);
 }
 
 bool net_trust_save(const NetTrust* trust, const char* path)
@@ -194,10 +326,53 @@ bool net_trust_save(const NetTrust* trust, const char* path)
         net_bytes_to_hex(device->key, NET_KEY_SIZE, hex, sizeof(hex));
         std::string section = std::string(DEVICE_PREFIX) + hex;
         settings_file_set(&file, section.c_str(), "name", device->name.c_str());
-        settings_file_set(&file, section.c_str(), "access", net_access_level_name(device->access));
+        settings_file_set(&file, section.c_str(), "kind", net_device_kind_name(device->kind));
+        settings_file_set(&file, section.c_str(), "grants", net_caps_name(device->grants).c_str());
+        settings_file_set(&file, section.c_str(), "granted", net_caps_name(device->granted).c_str());
+        settings_file_set(&file, section.c_str(), "signed", device->signed_build ? "true" : "false");
         settings_file_set(&file, section.c_str(), "paired", device->paired.c_str());
     }
-    return settings_file_save(&file, path, "Paired devices (a device is its key; the name is only shown)");
+    bool saved = settings_file_save(&file, path, "Paired devices (a device is its key; the name is only shown)");
+    trust_generation.fetch_add(1);
+    return saved;
+}
+
+bool net_trust_merge_old_hosts(NetTrust* trust, const char* path, const char* old_hosts_path)
+{
+    if (!host_fs_exists(old_hosts_path))
+    {
+        return true;
+    }
+    std::vector<NetTrustedDevice> hosts;
+    if (!load_devices(old_hosts_path, &hosts))
+    {
+        host_log(LogLevel::warning, "Network: %s is unreadable; left as it is", old_hosts_path);
+        return true;
+    }
+    for (size_t i = 0; i < hosts.size(); i++)
+    {
+        if (net_trust_find(trust, hosts[i].key) >= 0)
+        {
+            continue;
+        }
+        NetTrustedDevice device = hosts[i];
+        // A client's list held no real level (always gamepad): that host
+        // grants us what it says next time, and it may use nothing here.
+        device.grants = 0;
+        device.granted = 0;
+        trust->devices.push_back(device);
+    }
+    if (!net_trust_save(trust, path))
+    {
+        return false;
+    }
+    std::string renamed = std::string(old_hosts_path) + ".old";
+    if (!host_fs_rename(old_hosts_path, renamed.c_str()))
+    {
+        host_log(LogLevel::warning, "Network: merged %s but couldn't rename it", old_hosts_path);
+    }
+    host_log(LogLevel::info, "Network: %s merged into %s", old_hosts_path, path);
+    return true;
 }
 
 int32_t net_trust_find(const NetTrust* trust, const uint8_t* key)

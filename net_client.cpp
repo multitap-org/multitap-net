@@ -6,17 +6,73 @@
 #include "host_log.h"
 #include "monocypher.h"
 
-bool net_client_create(NetClient* client, const NetKeypair* identity, const char* name, const char* trust_path)
+// --- the paired devices: our copy, and changes under the file lock ----------
+
+static void load_trust(NetClient* client)
+{
+    client->trust_generation = net_trust_generation();
+    net_trust_load(&client->trust, client->trust_path.c_str());
+}
+
+// The device we're connected to keeps its place in our list after a reload.
+static void remap_device(NetClient* client)
+{
+    if (client->device < 0)
+    {
+        return;
+    }
+    client->device = net_trust_find(&client->trust, client->host_key);
+}
+
+static void refresh_trust(NetClient* client)
+{
+    if (client->trust_generation == net_trust_generation())
+    {
+        return;
+    }
+    net_trust_file_lock();
+    load_trust(client);
+    net_trust_file_unlock();
+    remap_device(client);
+}
+
+static void edit_begin(NetClient* client)
+{
+    net_trust_file_lock();
+    load_trust(client);
+    remap_device(client);
+}
+
+static void edit_end(NetClient* client)
+{
+    if (!net_trust_save(&client->trust, client->trust_path.c_str()))
+    {
+        host_log(LogLevel::error, "Network: could not save the paired devices to %s", client->trust_path.c_str());
+    }
+    client->trust_generation = net_trust_generation();
+    net_trust_file_unlock();
+}
+
+bool net_client_create(NetClient* client, const NetKeypair* identity, const NetDeviceInfo* info,
+                       const char* trust_path)
 {
     client->trust_path = trust_path;
+    client->info = *info;
     // Kept as the messages will carry it (cut), so CPace's ADa matches the host's view.
-    uint8_t name_bytes[NET_DEVICE_NAME_MAX];
-    size_t name_size = net_pair_name_bytes(name, name_bytes);
-    client->name.assign(name, name_size);
+    net_device_info_set_name(&client->info, info->name);
+    client->name = client->info.name;
     std::memcpy(client->our_key, identity->public_key, NET_KEY_SIZE);
     client->out.resize(NET_PAIR_MAX_MESSAGE);
-    net_trust_load(&client->trust, trust_path);
+    net_trust_file_lock();
+    load_trust(client);
+    net_trust_file_unlock();
     return net_session_create_client(&client->session, identity);
+}
+
+void net_client_set_verify_build(NetClient* client, NetVerifyBuildFn verify, void* user)
+{
+    client->verify_build = verify;
+    client->verify_user = user;
 }
 
 static void forget_secrets(NetClient* client)
@@ -26,25 +82,7 @@ static void forget_secrets(NetClient* client)
     net_cpace_wipe(&client->cpace);
     client->has_code = false;
     client->failures = 0;
-    client->just_paired = false;
     client->welcome_pending = false;
-}
-
-void net_client_set_pairing(NetClient* client, NetAccessLevel want, NetPairKind kind)
-{
-    client->want = want;
-    client->kind = kind;
-}
-
-bool net_client_grant_back(NetClient* client, NetAccessLevel level)
-{
-    if (client->state != NetClientState::ready || !client->just_paired)
-    {
-        return false;
-    }
-    client->just_paired = false;
-    size_t size = net_message_write_grant_back(client->out.data(), client->out.size(), level);
-    return size > 0 && net_session_send(&client->session, client->peer, NetChannel::control, client->out.data(), size);
 }
 
 // A guest connection is over (or never started): our own key again.
@@ -69,22 +107,14 @@ void net_client_destroy(NetClient* client)
     net_session_destroy(&client->session);
 }
 
-bool net_client_connect(NetClient* client, NetAddress address, const char* code)
+bool net_client_connect(NetClient* client, NetAddress address, bool pair)
 {
     if (client->state != NetClientState::idle)
     {
         return false;
     }
     forget_secrets(client);
-    if (code != nullptr)
-    {
-        if (!net_pair_code_valid(code))
-        {
-            return false;
-        }
-        std::memcpy(client->code, code, NET_PAIR_CODE_DIGITS + 1);
-        client->has_code = true;
-    }
+    client->pair = pair;
     if (!net_session_connect(&client->session, address, &client->peer))
     {
         return false;
@@ -156,11 +186,13 @@ static bool start_meeting(NetClient* client, const NetAddress* servers, uint32_t
 
 bool net_client_connect_beacon(NetClient* client, const NetAddress* servers, uint32_t count, uint32_t device)
 {
+    refresh_trust(client);
     if (client->state != NetClientState::idle || device >= client->trust.devices.size())
     {
         return false;
     }
     forget_secrets(client);
+    client->pair = false;
     std::memcpy(client->meet_key, client->trust.devices[device].key, NET_KEY_SIZE);
     client->meet_pairing = false;
     client->expect_key = false;   // the welcome checks it against our list
@@ -181,7 +213,8 @@ bool net_client_pair_beacon(NetClient* client, const NetAddress* servers, uint32
     forget_secrets(client);
     std::memcpy(client->code, code, NET_PAIR_CODE_DIGITS + 1);
     client->has_code = true;
-    std::memset(client->meet_key, 0, NET_KEY_SIZE);   // we don't know who will type it
+    client->pair = true;
+    std::memset(client->meet_key, 0, NET_KEY_SIZE);   // we don't know who shows it
     client->meet_pairing = true;
     client->expect_key = false;
     char slot[NET_PAIR_SLOT_DIGITS + 1] = {};
@@ -193,7 +226,7 @@ bool net_client_pair_beacon(NetClient* client, const NetAddress* servers, uint32
         forget_secrets(client);
         return false;
     }
-    client->beacon.patient = true;   // the host joins when its user has typed the code
+    client->beacon.patient = true;   // the host may not be in its room yet
     return true;
 }
 
@@ -204,6 +237,7 @@ bool net_client_join_guest(NetClient* client, const NetGuestLink* link, const Ne
         return false;
     }
     forget_secrets(client);
+    client->pair = false;
     if (!client->has_guest_identity)
     {
         if (!net_keypair_generate(&client->guest_identity))
@@ -344,6 +378,13 @@ static void send_control(NetClient* client, size_t size)
     }
 }
 
+// Asks the host for a code (it shows one); our user types it.
+static void ask_code(NetClient* client)
+{
+    send_control(client, net_message_write_pair_ask(client->out.data(), client->out.size()));
+    client->state = NetClientState::code_wait;
+}
+
 static void start_pairing(NetClient* client)
 {
     uint8_t ci[NET_PAIR_CI_SIZE];
@@ -361,28 +402,40 @@ static void start_pairing(NetClient* client)
     {
         return;
     }
-    send_control(client, net_message_write_pair_request(client->out.data(), client->out.size(), client->cpace.share,
-                                                        client->want, client->kind, client->name.c_str()));
+    send_control(client, net_message_write_pair_request(client->out.data(), client->out.size(), client->cpace.share));
     client->state = NetClientState::pairing;
+}
+
+bool net_client_enter_code(NetClient* client, const char* code)
+{
+    if (client->state != NetClientState::code_wait || !net_pair_code_valid(code))
+    {
+        return false;
+    }
+    std::memcpy(client->code, code, NET_PAIR_CODE_DIGITS + 1);
+    client->has_code = true;
+    start_pairing(client);
+    return true;
 }
 
 static void on_pair_response(NetClient* client, const uint8_t* data, size_t size, NetClientEvent* event)
 {
     uint8_t their_share[NET_CPACE_SHARE_SIZE];
     uint8_t their_confirm[NET_PAIR_CONFIRM_SIZE];
-    char host_name[NET_DEVICE_NAME_MAX + 1];
-    if (!net_message_read_pair_response(data, size, their_share, their_confirm, host_name))
+    if (!net_message_read_pair_response(data, size, their_share, their_confirm))
     {
         refuse(client, NetClientRefusal::wrong_code, true, event);
         return;
     }
     uint8_t ad_a[NET_DEVICE_NAME_MAX];
     uint8_t ad_b[NET_DEVICE_NAME_MAX];
-    size_t ad_a_size = net_pair_name_bytes(client->name.c_str(), ad_a);
-    size_t ad_b_size = net_pair_name_bytes(host_name, ad_b);
+    size_t ad_a_size = net_pair_name_bytes(client->info.name, ad_a);
+    size_t ad_b_size = net_pair_name_bytes(client->host.name, ad_b);
     bool finished = net_cpace_finish(&client->cpace, true, their_share, ad_a, ad_a_size, ad_b, ad_b_size,
                                      client->handshake_hash, NET_PAIR_SID_SIZE, client->isk);
     net_cpace_wipe(&client->cpace);
+    crypto_wipe(client->code, sizeof(client->code));
+    client->has_code = false;
     uint8_t expected[NET_PAIR_CONFIRM_SIZE];
     if (finished)
     {
@@ -390,25 +443,90 @@ static void on_pair_response(NetClient* client, const uint8_t* data, size_t size
     }
     if (!finished || crypto_verify32(their_confirm, expected) != 0)
     {
-        // The host's key doesn't match ours: its user typed the code wrong (or
-        // someone sits in the middle). A new code, and we ask again.
+        // The host's key doesn't match ours: our user typed the code wrong (or
+        // someone sits in the middle). We ask again (the host makes a new code
+        // unless it shows one) and our user types again.
         crypto_wipe(client->isk, sizeof(client->isk));
         client->failures++;
-        if (client->failures >= NET_PAIRING_MAX_FAILURES || !net_pair_code_generate(client->code))
+        if (client->failures >= NET_PAIRING_MAX_FAILURES)
         {
             refuse(client, NetClientRefusal::wrong_code, true, event);
             return;
         }
-        start_pairing(client);
-        event->type = NetClientEventType::code_changed;
+        ask_code(client);
+        event->type = NetClientEventType::code_needed;
+        event->retry = true;
+        event->host = client->host;
+        event->host_signed = client->host_signed;
         return;
     }
-    std::snprintf(client->host_name, sizeof(client->host_name), "%s", host_name);
     uint8_t confirm[NET_PAIR_CONFIRM_SIZE];
     net_pair_confirm(client->isk, false, confirm);
     crypto_wipe(client->isk, sizeof(client->isk));
     send_control(client, net_message_write_pair_confirm(client->out.data(), client->out.size(), confirm));
     client->state = NetClientState::confirming;
+}
+
+static bool check_build(const NetClient* client, const NetDeviceInfo* info)
+{
+    return client->verify_build != nullptr && info->record_size > 0 && client->verify_build(client->verify_user, info);
+}
+
+// What the host said about itself, and what it lets us use, kept in its record.
+static void store_host(NetClient* client)
+{
+    if (client->device < 0)
+    {
+        return;
+    }
+    const NetTrustedDevice* known = &client->trust.devices[static_cast<size_t>(client->device)];
+    if (known->name == client->host.name && known->kind == client->host.kind &&
+        known->signed_build == client->host_signed && known->granted == client->caps)
+    {
+        return;
+    }
+    edit_begin(client);
+    if (client->device >= 0)
+    {
+        NetTrustedDevice* record = &client->trust.devices[static_cast<size_t>(client->device)];
+        net_trust_rename(&client->trust, static_cast<uint32_t>(client->device), client->host.name);
+        record->kind = client->host.kind;
+        record->signed_build = client->host_signed;
+        record->granted = client->caps;
+    }
+    edit_end(client);
+}
+
+// What the host may use here, as our list says.
+static void send_grant(NetClient* client)
+{
+    if (client->device < 0)
+    {
+        return;
+    }
+    NetCaps grants = client->trust.devices[static_cast<size_t>(client->device)].grants;
+    send_control(client, net_message_write_grant(client->out.data(), client->out.size(), grants));
+}
+
+void net_client_set_grants(NetClient* client, uint32_t device, NetCaps grants)
+{
+    if (device >= client->trust.devices.size())
+    {
+        return;
+    }
+    uint8_t key[NET_KEY_SIZE];
+    std::memcpy(key, client->trust.devices[device].key, NET_KEY_SIZE);
+    edit_begin(client);
+    int32_t found = net_trust_find(&client->trust, key);
+    if (found >= 0)
+    {
+        client->trust.devices[static_cast<size_t>(found)].grants = grants & NET_CAPS_ALL;
+    }
+    edit_end(client);
+    if (found >= 0 && client->state == NetClientState::ready && client->device == found)
+    {
+        send_grant(client);
+    }
 }
 
 // Whether `mac` is the host's proof for this connection.
@@ -436,10 +554,10 @@ static void on_guest_control(NetClient* client, const uint8_t* data, size_t size
             return;
         }
         client->guest_level = level;
-        client->access = NetAccessLevel::stream;
+        client->caps = NET_CAP_STREAM;
         event->guest = true;
         event->guest_level = level;
-        event->access = NetAccessLevel::stream;
+        event->caps = NET_CAP_STREAM;
         if (client->state == NetClientState::waiting)
         {
             client->state = NetClientState::ready;
@@ -447,7 +565,7 @@ static void on_guest_control(NetClient* client, const uint8_t* data, size_t size
         }
         else
         {
-            event->type = NetClientEventType::access;   // the host changed the level
+            event->type = NetClientEventType::caps;   // the host changed the level
         }
         return;
     }
@@ -495,30 +613,28 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
     uint8_t type = net_message_type(data, size);
     if (client->state == NetClientState::ready)
     {
-        char host_name[NET_DEVICE_NAME_MAX + 1];
-        NetAccessLevel level = NetAccessLevel::gamepad;
+        NetDeviceInfo host;
+        NetCaps caps = 0;
         if (net_message_read_unpair(data, size))
         {
             // The host forgot us: forget it. It closes the connection.
+            edit_begin(client);
             if (client->device >= 0)
             {
                 net_trust_remove(&client->trust, static_cast<uint32_t>(client->device));
-                if (!net_trust_save(&client->trust, client->trust_path.c_str()))
-                {
-                    host_log(LogLevel::error, "Network: could not save the paired hosts to %s",
-                             client->trust_path.c_str());
-                }
             }
+            edit_end(client);
             client->device = -1;
             event->type = NetClientEventType::unpaired;
             return;
         }
-        if (net_message_read_welcome(data, size, &level, host_name))
+        if (net_message_read_welcome(data, size, &caps, &host))
         {
-            // Sent again when the host changes our level.
-            client->access = level;
-            event->type = NetClientEventType::access;
-            event->access = level;
+            // Sent again when the host changes what we may use.
+            client->caps = caps;
+            store_host(client);
+            event->type = NetClientEventType::caps;
+            event->caps = caps;
             return;
         }
         if (type >= NET_MESSAGE_FIRST_APP)
@@ -532,48 +648,71 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
     }
     if (client->state == NetClientState::waiting)
     {
-        char host_name[NET_DEVICE_NAME_MAX + 1];
         bool open = false;
-        NetAccessLevel level = NetAccessLevel::gamepad;
-        if (net_message_read_welcome(data, size, &level, host_name))
+        NetCaps caps = 0;
+        if (net_message_read_welcome(data, size, &caps, &client->host))
         {
+            client->host_signed = check_build(client, &client->host);
+            refresh_trust(client);
             int32_t device = net_trust_find(&client->trust, client->host_key);
             if (device < 0)
             {
                 refuse(client, NetClientRefusal::unknown_host, true, event);
                 return;
             }
-            std::snprintf(client->host_name, sizeof(client->host_name), "%s", host_name);
             forget_secrets(client);
             client->device = device;
-            client->access = level;
+            client->caps = caps;
             client->state = NetClientState::ready;
-            // Our name as it is now: the host's list follows a renamed device.
-            send_control(client, net_message_write_device_name(client->out.data(), client->out.size(),
-                                                               client->name.c_str()));
+            store_host(client);
+            send_grant(client);
             event->type = NetClientEventType::ready;
-            event->device = device;
-            event->access = level;
+            event->device = client->device;
+            event->caps = caps;
+            event->host = client->host;
+            event->host_signed = client->host_signed;
             return;
         }
-        if (net_message_read_pairing_needed(data, size, &open, host_name))
+        if (net_message_read_pairing_needed(data, size, &open, &client->host))
         {
+            client->host_signed = check_build(client, &client->host);
             if (!open)
             {
                 // The host closes the connection itself after this message.
-                refuse(client, client->has_code ? NetClientRefusal::pairing_closed : NetClientRefusal::not_paired,
-                       false, event);
+                refuse(client, client->pair ? NetClientRefusal::pairing_closed : NetClientRefusal::not_paired, false,
+                       event);
             }
-            else if (!client->has_code)
+            else if (!client->pair)
             {
                 refuse(client, NetClientRefusal::not_paired, true, event);
             }
+            else if (client->has_code)
+            {
+                // Typed before we met (GENERATE PAIRING CODE there): ask and
+                // answer at once.
+                ask_code(client);
+                start_pairing(client);
+            }
             else
             {
-                start_pairing(client);
+                ask_code(client);
+                event->type = NetClientEventType::code_needed;
+                event->host = client->host;
+                event->host_signed = client->host_signed;
             }
             return;
         }
+    }
+    else if (client->state == NetClientState::code_wait)
+    {
+        // Waiting for our user's code: only a refusal can come (the host's
+        // user said no); the host closes after it.
+        bool ok = true;
+        if (net_message_read_pair_result(data, size, &ok) && !ok)
+        {
+            refuse(client, NetClientRefusal::refused, false, event);
+        }
+        return;
     }
     else if (client->state == NetClientState::pairing && type == static_cast<uint8_t>(NetMessage::pair_response))
     {
@@ -582,45 +721,51 @@ static void on_control(NetClient* client, const uint8_t* data, size_t size, NetC
     }
     else if (client->state == NetClientState::pairing || client->state == NetClientState::confirming)
     {
-        // Paired: the host's welcome right after its result says the level
-        // its user picked (Andrés, 2026-11-22: given STREAM, the phone kept
-        // GAMEPAD, the level it had asked for, since it closed before this).
-        char host_name[NET_DEVICE_NAME_MAX + 1];
-        NetAccessLevel level = NetAccessLevel::gamepad;
-        if (client->welcome_pending && net_message_read_welcome(data, size, &level, host_name))
+        // Paired: the host's welcome right after its result says what its
+        // user lets us use.
+        NetCaps caps = 0;
+        NetDeviceInfo host;
+        if (client->welcome_pending && net_message_read_welcome(data, size, &caps, &host))
         {
             client->welcome_pending = false;
-            client->access = level;
+            client->caps = caps;
             client->state = NetClientState::ready;
-            client->just_paired = true;
+            store_host(client);
             event->type = NetClientEventType::ready;
             event->newly_paired = true;
-            event->access = level;
+            event->caps = caps;
             event->device = client->device;
+            event->host = client->host;
+            event->host_signed = client->host_signed;
             return;
         }
         bool ok = false;
         if (net_message_read_pair_result(data, size, &ok) && ok && client->state == NetClientState::confirming)
         {
-            uint32_t device = net_trust_add(&client->trust, client->host_key, client->host_name);
-            if (!net_trust_save(&client->trust, client->trust_path.c_str()))
-            {
-                host_log(LogLevel::error, "Network: could not save the paired hosts to %s", client->trust_path.c_str());
-            }
-            forget_secrets(client);
+            edit_begin(client);
+            uint32_t device = net_trust_add(&client->trust, client->host_key, client->host.name);
+            NetTrustedDevice* record = &client->trust.devices[device];
+            record->kind = client->host.kind;
+            record->signed_build = client->host_signed;
+            record->grants = 0;   // our user ticks them on the last screen (net_client_set_grants)
             client->device = static_cast<int32_t>(device);
-            client->welcome_pending = true;   // `ready` once the welcome says our level (just after)
+            edit_end(client);
+            forget_secrets(client);
+            client->welcome_pending = true;   // `ready` once the welcome says what we may use (just after)
             return;
         }
         refuse(client, NetClientRefusal::refused, false, event);   // the host closes after a refused result
         return;
     }
+    host_log(LogLevel::warning, "Network: message %u out of place (state %d): closed", static_cast<unsigned>(type),
+             static_cast<int>(client->state));
     refuse(client, NetClientRefusal::connection, true, event);   // a message out of place
 }
 
 bool net_client_poll(NetClient* client, NetClientEvent* event)
 {
     *event = {};
+    refresh_trust(client);
     if (beacon_step(client, event) || signal_step(client, event))
     {
         return true;
@@ -687,7 +832,12 @@ bool net_client_poll(NetClient* client, NetClientEvent* event)
             std::memcpy(client->host_key, session_event.remote_key, NET_KEY_SIZE);
             std::memcpy(client->handshake_hash, session_event.handshake_hash, NET_HASH_SIZE);
             client->state = NetClientState::waiting;
-            if (client->guest)
+            if (!client->guest)
+            {
+                // Who we are, before anything else.
+                send_control(client, net_message_write_hello(client->out.data(), client->out.size(), &client->info));
+            }
+            else
             {
                 // The token, for this connection, before anything else.
                 uint8_t mac[NET_GUEST_MAC_SIZE];
@@ -807,6 +957,8 @@ bool net_client_unpair(NetClient* client, uint32_t device)
     {
         return false;
     }
+    uint8_t key[NET_KEY_SIZE];
+    std::memcpy(key, client->trust.devices[device].key, NET_KEY_SIZE);
     if (client->state == NetClientState::ready && client->device == static_cast<int32_t>(device))
     {
         // Told first: the close waits for what's queued (disconnect_later).
@@ -816,15 +968,14 @@ bool net_client_unpair(NetClient* client, uint32_t device)
         net_session_close(&client->session, client->peer);
         client->device = -1;
     }
-    else if (client->device > static_cast<int32_t>(device))
+    edit_begin(client);
+    int32_t found = net_trust_find(&client->trust, key);
+    if (found >= 0)
     {
-        client->device--;   // indexes after it move down
+        net_trust_remove(&client->trust, static_cast<uint32_t>(found));
     }
-    net_trust_remove(&client->trust, device);
-    if (!net_trust_save(&client->trust, client->trust_path.c_str()))
-    {
-        host_log(LogLevel::error, "Network: could not save the paired hosts to %s", client->trust_path.c_str());
-    }
+    edit_end(client);
+    remap_device(client);
     return true;
 }
 

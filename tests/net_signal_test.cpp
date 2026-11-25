@@ -41,6 +41,18 @@ static void check(bool condition, const char* what)
     }
 }
 
+// A device as these tests describe it: a piccolo (offers everything) or a
+// phone (offers nothing), using everything they could.
+static NetDeviceInfo test_device(const char* name, bool phone)
+{
+    NetDeviceInfo info;
+    net_device_info_set_name(&info, name);
+    info.kind = phone ? NetDeviceKind::piccoletto : NetDeviceKind::piccolo;
+    info.offers = phone ? 0 : NET_CAPS_ALL;
+    info.uses = NET_CAPS_ALL;
+    return info;
+}
+
 struct Side
 {
     NetSession session;
@@ -250,9 +262,11 @@ int main(int argc, char** argv)
     net_trust_save(&hosts, client_hosts.c_str());
     NetAccess* access = new NetAccess();
     NetClient* phone = new NetClient();
-    check(net_access_create(access, 0, "LIVING ROOM", &host_key, host_devices.c_str()), "access created");
+    NetDeviceInfo host_info = test_device("LIVING ROOM", false);
+    check(net_access_create(access, 0, &host_info, &host_key, host_devices.c_str()), "access created");
     check(net_access_set_signal(access, url.c_str(), nullptr), "access signals");
-    check(net_client_create(phone, &client_key, "PHONE", client_hosts.c_str()), "client created");
+    NetDeviceInfo phone_info = test_device("PHONE", true);
+    check(net_client_create(phone, &client_key, &phone_info, client_hosts.c_str()), "client created");
     net_client_set_signal(phone, url.c_str(), nullptr);
     check(access_rooms_joined(access, 10000), "access in its rooms");
     check(net_access_signal_status(access) == NetSignalStatus::ready, "access signaling ready");
@@ -322,19 +336,19 @@ int main(int argc, char** argv)
     check(phone_ready && phone->via_signal, "UDP didn't find it; WebRTC did (ready)");
 
     // Pairing through signaling (a browser across the internet): the tablet
-    // shows its code, the host's user types it in INVITE (the code's slot
-    // room), CPace over the data channels.
+    // The host shows a code (GENERATE PAIRING CODE: its slot's room), the
+    // tablet's user types it, CPace over the data channels.
     std::string tablet_hosts = dir + "/tablet_hosts.cfg";
     NetTrust empty;
     net_trust_save(&empty, tablet_hosts.c_str());
     NetKeypair tablet_key;
     net_keypair_generate(&tablet_key);
     NetClient* tablet = new NetClient();
-    check(net_client_create(tablet, &tablet_key, "TABLET", tablet_hosts.c_str()), "tablet created");
+    NetDeviceInfo tablet_info = test_device("TABLET", true);
+    check(net_client_create(tablet, &tablet_key, &tablet_info, tablet_hosts.c_str()), "tablet created");
     net_client_set_signal(tablet, url.c_str(), nullptr);
     char code[NET_PAIR_CODE_DIGITS + 1];
-    net_pair_code_generate(code);
-    check(net_access_invite(access, code), "host invites with the tablet's code");
+    check(net_access_show_code(access, NET_CAPS_ALL, code), "host shows a code (GENERATE PAIRING CODE)");
     check(access_rooms_joined(access, 10000), "the pairing room joined");
     check(net_client_pair_beacon(tablet, nullptr, 0, code), "tablet pairs by signaling");
     bool tablet_ready = false;
@@ -345,10 +359,6 @@ int main(int argc, char** argv)
         NetAccessEvent access_event;
         while (net_access_poll(access, &access_event))
         {
-            if (access_event.type == NetAccessEventType::pairing_requested)
-            {
-                net_access_answer_pairing(access, access_event.peer, code, NetAccessLevel::gamepad);
-            }
             host_paired = host_paired || access_event.type == NetAccessEventType::paired;
         }
         NetClientEvent tablet_event;

@@ -5,7 +5,7 @@
 #include "monocypher.h"
 #include "net_random.h"
 
-static constexpr uint8_t CI_LABEL[15] = {'m', 'u', 'l', 't', 'i', 't', 'a', 'p', '-', 'p', 'a', 'i', 'r', ' ', '2'};
+static constexpr uint8_t CI_LABEL[15] = {'m', 'u', 'l', 't', 'i', 't', 'a', 'p', '-', 'p', 'a', 'i', 'r', ' ', '3'};
 static constexpr uint8_t CONFIRM_HOST[18] = {'m', 'u', 'l', 't', 'i', 't', 'a', 'p', ' ',
                                              'p', 'a', 'i', 'r', ' ', 'h', 'o', 's', 't'};
 static constexpr uint8_t CONFIRM_CLIENT[20] = {'m', 'u', 'l', 't', 'i', 't', 'a', 'p', ' ', 'p',
@@ -114,157 +114,260 @@ static size_t write_name(uint8_t* out, const char* name)
     return 1 + length;
 }
 
-// The name must fill the rest of the payload exactly.
-static bool read_name(const uint8_t* data, size_t size, char* name)
+void net_device_info_set_name(NetDeviceInfo* info, const char* name)
 {
+    size_t length = name_length(name);
+    std::memcpy(info->name, name, length);
+    info->name[length] = '\0';
+}
+
+static void put_u16(uint8_t* out, uint16_t value)
+{
+    out[0] = static_cast<uint8_t>(value & 0xFF);
+    out[1] = static_cast<uint8_t>(value >> 8);
+}
+
+static uint16_t get_u16(const uint8_t* data)
+{
+    return static_cast<uint16_t>(data[0] | (data[1] << 8));
+}
+
+static void put_u32(uint8_t* out, uint32_t value)
+{
+    for (uint32_t i = 0; i < 4; i++)
+    {
+        out[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xFF);
+    }
+}
+
+static uint32_t get_u32(const uint8_t* data)
+{
+    return static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
+           (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
+}
+
+static size_t info_size(const NetDeviceInfo* info)
+{
+    return 1 + name_length(info->name) + 1 + 4 + 4 + 2 + info->record_size + 2 + info->signature_size;
+}
+
+static size_t write_info(uint8_t* out, const NetDeviceInfo* info)
+{
+    size_t at = write_name(out, info->name);
+    out[at] = static_cast<uint8_t>(info->kind);
+    at += 1;
+    put_u32(out + at, info->offers);
+    at += 4;
+    put_u32(out + at, info->uses);
+    at += 4;
+    put_u16(out + at, info->record_size);
+    at += 2;
+    std::memcpy(out + at, info->record, info->record_size);
+    at += info->record_size;
+    put_u16(out + at, info->signature_size);
+    at += 2;
+    std::memcpy(out + at, info->signature, info->signature_size);
+    at += info->signature_size;
+    return at;
+}
+
+// The info must fill the rest of the payload exactly.
+static bool read_info(const uint8_t* data, size_t size, NetDeviceInfo* info)
+{
+    *info = NetDeviceInfo{};
     if (size < 1)
     {
         return false;
     }
-    size_t length = data[0];
-    if (length > NET_DEVICE_NAME_MAX || size != 1 + length || std::memchr(data + 1, 0, length) != nullptr)
+    size_t name = data[0];
+    if (name > NET_DEVICE_NAME_MAX || size < 1 + name + 1 + 4 + 4 + 2 || std::memchr(data + 1, 0, name) != nullptr)
     {
         return false;
     }
-    std::memcpy(name, data + 1, length);
-    name[length] = '\0';
+    std::memcpy(info->name, data + 1, name);
+    info->name[name] = '\0';
+    size_t at = 1 + name;
+    if (data[at] >= NET_DEVICE_KIND_COUNT)
+    {
+        return false;
+    }
+    info->kind = static_cast<NetDeviceKind>(data[at]);
+    at += 1;
+    info->offers = get_u32(data + at);
+    at += 4;
+    info->uses = get_u32(data + at);
+    at += 4;
+    if ((info->offers & ~NET_CAPS_ALL) != 0 || (info->uses & ~NET_CAPS_ALL) != 0)
+    {
+        return false;
+    }
+    info->record_size = get_u16(data + at);
+    at += 2;
+    if (info->record_size > NET_BUILD_RECORD_MAX || size < at + info->record_size + 2)
+    {
+        return false;
+    }
+    std::memcpy(info->record, data + at, info->record_size);
+    at += info->record_size;
+    info->signature_size = get_u16(data + at);
+    at += 2;
+    if (info->signature_size > NET_BUILD_SIGNATURE_MAX || size != at + info->signature_size)
+    {
+        return false;
+    }
+    std::memcpy(info->signature, data + at, info->signature_size);
     return true;
 }
 
 // --- messages ---------------------------------------------------------------
 
-NetAccessLevel net_message_required_access(uint8_t type)
+NetCaps net_message_required_cap(uint8_t type)
 {
     if (type >= NET_MESSAGE_FIRST_SHARE)
     {
-        return NetAccessLevel::share;   // below full in rank, above it in numbers
+        return NET_CAP_SHARE;
     }
-    if (type >= NET_MESSAGE_FIRST_FULL)
+    if (type >= NET_MESSAGE_FIRST_SETTINGS)
     {
-        return NetAccessLevel::full;
+        return NET_CAP_SETTINGS;
     }
     if (type >= NET_MESSAGE_FIRST_STREAM)
     {
-        return NetAccessLevel::stream;
+        return NET_CAP_STREAM;
     }
-    return NetAccessLevel::gamepad;
+    return NET_CAP_GAMEPAD;
 }
 
-bool net_access_allows(NetAccessLevel have, NetAccessLevel need)
+bool net_caps_allow(NetCaps have, uint8_t type)
 {
-    return static_cast<uint8_t>(have) >= static_cast<uint8_t>(need);
+    return (have & net_message_required_cap(type)) != 0;
 }
 
-size_t net_message_write_welcome(uint8_t* out, size_t capacity, NetAccessLevel access, const char* host_name)
+size_t net_message_write_hello(uint8_t* out, size_t capacity, const NetDeviceInfo* info)
 {
-    if (capacity < 3 + name_length(host_name))
+    if (capacity < 1 + info_size(info))
+    {
+        return 0;
+    }
+    out[0] = static_cast<uint8_t>(NetMessage::hello);
+    return 1 + write_info(out + 1, info);
+}
+
+bool net_message_read_hello(const uint8_t* data, size_t size, NetDeviceInfo* info)
+{
+    return size >= 1 && data[0] == static_cast<uint8_t>(NetMessage::hello) && read_info(data + 1, size - 1, info);
+}
+
+size_t net_message_write_welcome(uint8_t* out, size_t capacity, NetCaps caps, const NetDeviceInfo* host)
+{
+    if (capacity < 5 + info_size(host))
     {
         return 0;
     }
     out[0] = static_cast<uint8_t>(NetMessage::welcome);
-    out[1] = static_cast<uint8_t>(access);
-    return 2 + write_name(out + 2, host_name);
+    put_u32(out + 1, caps);
+    return 5 + write_info(out + 5, host);
 }
 
-bool net_message_read_welcome(const uint8_t* data, size_t size, NetAccessLevel* access, char* host_name)
+bool net_message_read_welcome(const uint8_t* data, size_t size, NetCaps* caps, NetDeviceInfo* host)
 {
-    if (size < 2 || data[0] != static_cast<uint8_t>(NetMessage::welcome) || data[1] >= NET_ACCESS_LEVEL_COUNT)
+    if (size < 5 || data[0] != static_cast<uint8_t>(NetMessage::welcome))
     {
         return false;
     }
-    *access = static_cast<NetAccessLevel>(data[1]);
-    return read_name(data + 2, size - 2, host_name);
-}
-
-size_t net_message_write_device_name(uint8_t* out, size_t capacity, const char* name)
-{
-    if (capacity < 2 + name_length(name))
+    uint32_t value = get_u32(data + 1);
+    if ((value & ~NET_CAPS_ALL) != 0)
     {
-        return 0;
+        return false;
     }
-    out[0] = static_cast<uint8_t>(NetMessage::device_name);
-    return 1 + write_name(out + 1, name);
+    *caps = value;
+    return read_info(data + 5, size - 5, host);
 }
 
-bool net_message_read_device_name(const uint8_t* data, size_t size, char* name)
+size_t net_message_write_pairing_needed(uint8_t* out, size_t capacity, bool open, const NetDeviceInfo* host)
 {
-    return size >= 1 && data[0] == static_cast<uint8_t>(NetMessage::device_name) && read_name(data + 1, size - 1, name);
-}
-
-size_t net_message_write_pairing_needed(uint8_t* out, size_t capacity, bool open, const char* host_name)
-{
-    if (capacity < 3 + name_length(host_name))
+    if (capacity < 2 + info_size(host))
     {
         return 0;
     }
     out[0] = static_cast<uint8_t>(NetMessage::pairing_needed);
     out[1] = open ? 1 : 0;
-    return 2 + write_name(out + 2, host_name);
+    return 2 + write_info(out + 2, host);
 }
 
-bool net_message_read_pairing_needed(const uint8_t* data, size_t size, bool* open, char* host_name)
+bool net_message_read_pairing_needed(const uint8_t* data, size_t size, bool* open, NetDeviceInfo* host)
 {
     if (size < 2 || data[0] != static_cast<uint8_t>(NetMessage::pairing_needed) || data[1] > 1)
     {
         return false;
     }
     *open = data[1] == 1;
-    return read_name(data + 2, size - 2, host_name);
+    return read_info(data + 2, size - 2, host);
 }
 
-size_t net_message_write_pair_request(uint8_t* out, size_t capacity, const uint8_t* share, NetAccessLevel want,
-                                      NetPairKind kind, const char* client_name)
+static size_t write_type_only(uint8_t* out, size_t capacity, NetMessage type)
 {
-    if (capacity < 4 + NET_CPACE_SHARE_SIZE + name_length(client_name))
+    if (capacity < 1)
+    {
+        return 0;
+    }
+    out[0] = static_cast<uint8_t>(type);
+    return 1;
+}
+
+size_t net_message_write_pair_ask(uint8_t* out, size_t capacity)
+{
+    return write_type_only(out, capacity, NetMessage::pair_ask);
+}
+
+bool net_message_read_pair_ask(const uint8_t* data, size_t size)
+{
+    return size == 1 && data[0] == static_cast<uint8_t>(NetMessage::pair_ask);
+}
+
+size_t net_message_write_pair_request(uint8_t* out, size_t capacity, const uint8_t* share)
+{
+    if (capacity < 1 + NET_CPACE_SHARE_SIZE)
     {
         return 0;
     }
     out[0] = static_cast<uint8_t>(NetMessage::pair_request);
     std::memcpy(out + 1, share, NET_CPACE_SHARE_SIZE);
-    out[1 + NET_CPACE_SHARE_SIZE] = static_cast<uint8_t>(want);
-    out[2 + NET_CPACE_SHARE_SIZE] = static_cast<uint8_t>(kind);
-    return 3 + NET_CPACE_SHARE_SIZE + write_name(out + 3 + NET_CPACE_SHARE_SIZE, client_name);
+    return 1 + NET_CPACE_SHARE_SIZE;
 }
 
-bool net_message_read_pair_request(const uint8_t* data, size_t size, uint8_t* share, NetAccessLevel* want,
-                                   NetPairKind* kind, char* client_name)
+bool net_message_read_pair_request(const uint8_t* data, size_t size, uint8_t* share)
 {
-    if (size < 3 + NET_CPACE_SHARE_SIZE || data[0] != static_cast<uint8_t>(NetMessage::pair_request) ||
-        data[1 + NET_CPACE_SHARE_SIZE] >= NET_ACCESS_LEVEL_COUNT || data[2 + NET_CPACE_SHARE_SIZE] > 1)
+    if (size != 1 + NET_CPACE_SHARE_SIZE || data[0] != static_cast<uint8_t>(NetMessage::pair_request))
     {
         return false;
     }
     std::memcpy(share, data + 1, NET_CPACE_SHARE_SIZE);
-    *want = static_cast<NetAccessLevel>(data[1 + NET_CPACE_SHARE_SIZE]);
-    *kind = static_cast<NetPairKind>(data[2 + NET_CPACE_SHARE_SIZE]);
-    return read_name(data + 3 + NET_CPACE_SHARE_SIZE, size - 3 - NET_CPACE_SHARE_SIZE, client_name);
+    return true;
 }
 
-size_t net_message_write_pair_response(uint8_t* out, size_t capacity, const uint8_t* share, const uint8_t* confirm,
-                                       const char* host_name)
+size_t net_message_write_pair_response(uint8_t* out, size_t capacity, const uint8_t* share, const uint8_t* confirm)
 {
-    if (capacity < 2 + NET_CPACE_SHARE_SIZE + NET_PAIR_CONFIRM_SIZE + name_length(host_name))
+    if (capacity < 1 + NET_CPACE_SHARE_SIZE + NET_PAIR_CONFIRM_SIZE)
     {
         return 0;
     }
     out[0] = static_cast<uint8_t>(NetMessage::pair_response);
     std::memcpy(out + 1, share, NET_CPACE_SHARE_SIZE);
     std::memcpy(out + 1 + NET_CPACE_SHARE_SIZE, confirm, NET_PAIR_CONFIRM_SIZE);
-    return 1 + NET_CPACE_SHARE_SIZE + NET_PAIR_CONFIRM_SIZE +
-           write_name(out + 1 + NET_CPACE_SHARE_SIZE + NET_PAIR_CONFIRM_SIZE, host_name);
+    return 1 + NET_CPACE_SHARE_SIZE + NET_PAIR_CONFIRM_SIZE;
 }
 
-bool net_message_read_pair_response(const uint8_t* data, size_t size, uint8_t* share, uint8_t* confirm,
-                                    char* host_name)
+bool net_message_read_pair_response(const uint8_t* data, size_t size, uint8_t* share, uint8_t* confirm)
 {
-    size_t fixed = 1 + NET_CPACE_SHARE_SIZE + NET_PAIR_CONFIRM_SIZE;
-    if (size < fixed || data[0] != static_cast<uint8_t>(NetMessage::pair_response))
+    if (size != 1 + NET_CPACE_SHARE_SIZE + NET_PAIR_CONFIRM_SIZE ||
+        data[0] != static_cast<uint8_t>(NetMessage::pair_response))
     {
         return false;
     }
     std::memcpy(share, data + 1, NET_CPACE_SHARE_SIZE);
     std::memcpy(confirm, data + 1 + NET_CPACE_SHARE_SIZE, NET_PAIR_CONFIRM_SIZE);
-    return read_name(data + fixed, size - fixed, host_name);
+    return true;
 }
 
 size_t net_message_write_pair_confirm(uint8_t* out, size_t capacity, const uint8_t* confirm)
@@ -309,38 +412,38 @@ bool net_message_read_pair_result(const uint8_t* data, size_t size, bool* ok)
     return true;
 }
 
-size_t net_message_write_unpair(uint8_t* out, size_t capacity)
+size_t net_message_write_grant(uint8_t* out, size_t capacity, NetCaps caps)
 {
-    if (capacity < 1)
+    if (capacity < 5)
     {
         return 0;
     }
-    out[0] = static_cast<uint8_t>(NetMessage::unpair);
-    return 1;
+    out[0] = static_cast<uint8_t>(NetMessage::grant);
+    put_u32(out + 1, caps);
+    return 5;
+}
+
+bool net_message_read_grant(const uint8_t* data, size_t size, NetCaps* caps)
+{
+    if (size != 5 || data[0] != static_cast<uint8_t>(NetMessage::grant))
+    {
+        return false;
+    }
+    uint32_t value = get_u32(data + 1);
+    if ((value & ~NET_CAPS_ALL) != 0)
+    {
+        return false;
+    }
+    *caps = value;
+    return true;
+}
+
+size_t net_message_write_unpair(uint8_t* out, size_t capacity)
+{
+    return write_type_only(out, capacity, NetMessage::unpair);
 }
 
 bool net_message_read_unpair(const uint8_t* data, size_t size)
 {
     return size == 1 && data[0] == static_cast<uint8_t>(NetMessage::unpair);
-}
-
-size_t net_message_write_grant_back(uint8_t* out, size_t capacity, NetAccessLevel level)
-{
-    if (capacity < 2)
-    {
-        return 0;
-    }
-    out[0] = static_cast<uint8_t>(NetMessage::grant_back);
-    out[1] = static_cast<uint8_t>(level);
-    return 2;
-}
-
-bool net_message_read_grant_back(const uint8_t* data, size_t size, NetAccessLevel* level)
-{
-    if (size != 2 || data[0] != static_cast<uint8_t>(NetMessage::grant_back) || data[1] >= NET_ACCESS_LEVEL_COUNT)
-    {
-        return false;
-    }
-    *level = static_cast<NetAccessLevel>(data[1]);
-    return true;
 }

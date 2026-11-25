@@ -1,8 +1,15 @@
 #pragma once
 
 // The host's side of net_share.h: its shared folders (the game folders,
-// SAVES, STATES and SCREENSHOTS) as the virtual paths a SHARE device sees,
-// listed, read and written without ever leaving them.
+// SAVES, STATES, SCREENSHOTS, RECORDINGS and CONFIG) as the virtual paths a
+// SHARE device sees, listed, read and written without ever leaving them.
+//
+// CONFIG (Andrés, 2026-11-25) holds only configs that don't depend on the
+// device (remaps, combos and macros, core options, per-core / per-game
+// overrides). Whatever the folder, these names are never listed, read or
+// written there, at any depth: the device's identity and paired devices
+// (net_identity.cfg, net_devices.cfg, net_hosts.cfg and its .old), cache/,
+// and the names the frontend adds (its global settings file, recent games).
 //
 // Every path a device sends goes through the same part rules as
 // net_content.h ("", ".", "..", '\\', ':' and control characters refused
@@ -26,26 +33,37 @@ struct NetShareRoot
     NetShareKind kind = NetShareKind::games;
 };
 
+// What to share ("" = not shared). `config_refused`: more names CONFIG never
+// shows (the frontend's global settings file, its recent games list).
+struct NetShareFolderPaths
+{
+    std::vector<std::string> games;
+    std::string saves;
+    std::string states;
+    std::string screenshots;
+    std::string recordings;
+    std::string config;
+    std::vector<std::string> config_refused;
+};
+
 struct NetShareFolders
 {
     std::vector<NetShareRoot> roots;
+    std::vector<std::string>  config_refused;   // net_share_set_folders: the built-in names + the frontend's
 
     // The last folder listed, kept for its next pages.
     std::string                listed_path;
     std::vector<NetShareEntry> listed;
 };
 
-// The game folders, then SAVES, STATES and SCREENSHOTS ("" = not shared).
+// The game folders, then SAVES, STATES, SCREENSHOTS, RECORDINGS and CONFIG.
 // Folders that don't exist now are left out; call again when the settings
-// change. A game
-// folder whose name is taken ("saves" can't be "SAVES"... but "SAVES" can)
-// gets " 2", " 3".
-void net_share_set_folders(NetShareFolders* folders, const std::vector<std::string>* game_paths,
-                           const char* saves_path, const char* states_path,
-                           const char* screenshots_path);
+// change. A game folder whose name is taken ("saves" can't be "SAVES"... but
+// "SAVES" can) gets " 2", " 3".
+void net_share_set_folders(NetShareFolders* folders, const NetShareFolderPaths* paths);
 
-// What's in a virtual folder: "" = the shared folders (kinds games / saves /
-// states / screenshots), otherwise folders first, then files, each sorted ignoring case.
+// What's in a virtual folder: "" = the shared folders (their kinds),
+// otherwise folders first, then files, each sorted ignoring case.
 // Hidden entries and symlinks leading out of the shared folders are left out.
 NetShareStatus net_share_list(const NetShareFolders* folders, const char* path, std::vector<NetShareEntry>* entries);
 

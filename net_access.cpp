@@ -1,33 +1,87 @@
 #include "net_access.h"
 
 #include <cstdio>
-
 #include <cstring>
 
 #include "host_log.h"
 #include "monocypher.h"
 
 static void beacon_refresh_ids(NetAccess* access);
+static void remap_peers(NetAccess* access);
 
-bool net_access_create(NetAccess* access, uint16_t port, const char* name, const NetKeypair* identity,
+// --- the paired devices: our copy, and changes under the file lock ----------
+
+static void load_trust(NetAccess* access)
+{
+    access->trust_generation = net_trust_generation();
+    net_trust_load(&access->trust, access->trust_path.c_str());
+}
+
+// Another side (net_client.h) saved: our copy again, peers moved to their
+// devices' new places (a device forgotten there closes here).
+static void refresh_trust(NetAccess* access)
+{
+    if (access->trust_generation == net_trust_generation())
+    {
+        return;
+    }
+    net_trust_file_lock();
+    load_trust(access);
+    net_trust_file_unlock();
+    remap_peers(access);
+    beacon_refresh_ids(access);
+}
+
+// A change: lock, a fresh copy, then edit_end saves it and unlocks.
+static void edit_begin(NetAccess* access)
+{
+    net_trust_file_lock();
+    load_trust(access);
+    remap_peers(access);
+}
+
+static void edit_end(NetAccess* access)
+{
+    if (!net_trust_save(&access->trust, access->trust_path.c_str()))
+    {
+        host_log(LogLevel::error, "Network: could not save the paired devices to %s", access->trust_path.c_str());
+    }
+    access->trust_generation = net_trust_generation();
+    net_trust_file_unlock();
+    beacon_refresh_ids(access);
+}
+
+bool net_access_create(NetAccess* access, uint16_t port, const NetDeviceInfo* info, const NetKeypair* identity,
                        const char* trust_path)
 {
     access->trust_path = trust_path;
-    access->name = name;
+    access->info = *info;
+    access->name = info->name;
     std::memcpy(access->host_key, identity->public_key, NET_KEY_SIZE);
     access->out.resize(NET_PAIR_MAX_MESSAGE);
-    net_trust_load(&access->trust, trust_path);
-    if (!net_session_create_listener(&access->session, port, name, identity))
+    net_trust_file_lock();
+    load_trust(access);
+    net_trust_file_unlock();
+    if (!net_session_create_listener(&access->session, port, info->name, identity))
     {
         return false;
     }
+    net_host_set_discovery_info(&access->session.host, static_cast<uint8_t>(info->kind), info->offers,
+                                info->record_size > 0);
     beacon_refresh_ids(access);
     return true;
+}
+
+void net_access_set_verify_build(NetAccess* access, NetVerifyBuildFn verify, void* user)
+{
+    access->verify_build = verify;
+    access->verify_user = user;
 }
 
 static void peer_reset(NetAccessPeer* peer)
 {
     crypto_wipe(peer->isk, sizeof(peer->isk));
+    crypto_wipe(peer->code, sizeof(peer->code));
     *peer = {};
 }
 
@@ -37,18 +91,18 @@ void net_access_destroy(NetAccess* access)
     {
         peer_reset(&access->peers[i]);
     }
-    net_access_end_invite(access);
+    net_access_end_code(access);
     net_guest_link_wipe(&access->guest_link);
     net_signal_stop(&access->signal);
     net_session_destroy(&access->session);
 }
 
 // The beacon registers one meeting id per paired device; computed again when
-// the list changes (only then: a level change leaves the ids alone).
+// the list changes (only then: a change of grants leaves the ids alone).
 static void beacon_refresh_ids(NetAccess* access)
 {
     std::vector<BeaconId> ids;
-    ids.reserve(access->trust.devices.size() + 1);
+    ids.reserve(access->trust.devices.size() + 2);
     for (size_t i = 0; i < access->trust.devices.size(); i++)
     {
         BeaconId id;
@@ -57,9 +111,9 @@ static void beacon_refresh_ids(NetAccess* access)
             ids.push_back(id);
         }
     }
-    if (access->inviting)
+    if (access->showing)
     {
-        // The pairing room of the code our user typed: the client waits there.
+        // The pairing room of the code we show: the device that types it comes there.
         BeaconId id;
         net_beacon_pair_id(access->invite_slot, &id);
         ids.push_back(id);
@@ -85,16 +139,7 @@ static void beacon_refresh_ids(NetAccess* access)
         net_signal_host_set_rooms(&access->signal, &access->session.identity,
                                   reinterpret_cast<const uint8_t(*)[NET_KEY_SIZE]>(keys.data()),
                                   static_cast<uint32_t>(access->trust.devices.size()),
-                                  access->inviting ? access->invite_slot : nullptr);
-    }
-}
-
-static void save_trust(NetAccess* access)
-{
-    beacon_refresh_ids(access);
-    if (!net_trust_save(&access->trust, access->trust_path.c_str()))
-    {
-        host_log(LogLevel::error, "Network: could not save the paired devices to %s", access->trust_path.c_str());
+                                  access->showing ? access->invite_slot : nullptr);
     }
 }
 
@@ -106,24 +151,83 @@ static void send_control(NetAccess* access, uint32_t peer, size_t size)
     }
 }
 
-bool net_access_invite(NetAccess* access, const char* code)
+// What a peer may use now: the stored grant, what we offer, what it uses.
+static NetCaps effective_caps(const NetAccess* access, const NetAccessPeer* peer)
 {
-    if (!net_pair_code_valid(code))
+    if (peer->state != NetAccessPeerState::authorized || peer->device < 0 ||
+        static_cast<size_t>(peer->device) >= access->trust.devices.size())
+    {
+        return 0;
+    }
+    return access->trust.devices[static_cast<size_t>(peer->device)].grants & access->info.offers & peer->info.uses;
+}
+
+NetCaps net_access_peer_caps(const NetAccess* access, uint32_t peer)
+{
+    return peer < NET_MAX_PEERS ? effective_caps(access, &access->peers[peer]) : 0;
+}
+
+static void send_welcome(NetAccess* access, uint32_t index)
+{
+    send_control(access, index,
+                 net_message_write_welcome(access->out.data(), access->out.size(),
+                                           effective_caps(access, &access->peers[index]), &access->info));
+}
+
+// After the list was loaded again: each authorized peer finds its device by
+// key; one whose device is gone was unpaired on the other side (forgotten).
+static void remap_peers(NetAccess* access)
+{
+    for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
+    {
+        NetAccessPeer* peer = &access->peers[i];
+        if (peer->state != NetAccessPeerState::authorized && peer->state != NetAccessPeerState::hello_wait)
+        {
+            continue;
+        }
+        int32_t device = net_trust_find(&access->trust, peer->key);
+        if (device < 0)
+        {
+            host_log(LogLevel::info, "Network: a connected device was forgotten on this device's other side: closed");
+            net_session_close(&access->session, i);
+            peer->state = NetAccessPeerState::none;
+            peer->device = -1;
+            peer->forgotten = true;
+            continue;
+        }
+        peer->device = device;
+    }
+}
+
+bool net_access_show_code(NetAccess* access, NetCaps grants, char* code)
+{
+    if (!net_pair_code_generate(access->shown_code))
     {
         return false;
     }
-    std::memcpy(access->invite_slot, code, NET_PAIR_SLOT_DIGITS);
+    std::memcpy(code, access->shown_code, NET_PAIR_CODE_DIGITS + 1);
+    std::memcpy(access->invite_slot, access->shown_code, NET_PAIR_SLOT_DIGITS);
     access->invite_slot[NET_PAIR_SLOT_DIGITS] = '\0';
-    access->inviting = true;
-    beacon_refresh_ids(access);   // the pairing room joins
+    access->shown_grants = grants & access->info.offers;
+    access->shown_since = net_seconds();
+    access->showing = true;
+    access->beacon.ids.clear();   // the pairing room (maybe a new slot) joins
+    beacon_refresh_ids(access);
     return true;
 }
 
-void net_access_end_invite(NetAccess* access)
+void net_access_set_shown_grants(NetAccess* access, NetCaps grants)
 {
-    bool was = access->inviting;
-    access->inviting = false;
+    access->shown_grants = grants & access->info.offers;
+}
+
+void net_access_end_code(NetAccess* access)
+{
+    bool was = access->showing;
+    access->showing = false;
+    crypto_wipe(access->shown_code, sizeof(access->shown_code));
     std::memset(access->invite_slot, 0, sizeof(access->invite_slot));
+    access->shown_grants = 0;
     if (was)
     {
         beacon_refresh_ids(access);   // and leaves
@@ -142,13 +246,14 @@ static bool refused_before(const NetAccess* access, const uint8_t* key)
     return false;
 }
 
-static void on_secured(NetAccess* access, const NetSessionEvent* session_event, NetAccessEvent* event, bool* filled)
+static void on_secured(NetAccess* access, const NetSessionEvent* session_event)
 {
     uint32_t index = session_event->peer;
     if (index >= NET_MAX_PEERS)
     {
         return;
     }
+    refresh_trust(access);
     NetAccessPeer* peer = &access->peers[index];
     peer_reset(peer);
     std::memcpy(peer->key, session_event->remote_key, NET_KEY_SIZE);
@@ -158,23 +263,16 @@ static void on_secured(NetAccess* access, const NetSessionEvent* session_event, 
     int32_t device = net_trust_find(&access->trust, peer->key);
     if (device >= 0)
     {
-        peer->state = NetAccessPeerState::authorized;
+        // Welcomed once it says who it is (hello): what it may use depends
+        // on what it uses.
+        peer->state = NetAccessPeerState::hello_wait;
         peer->device = device;
-        NetAccessLevel level = access->trust.devices[static_cast<size_t>(device)].access;
-        send_control(access, index,
-                     net_message_write_welcome(access->out.data(), access->out.size(), level, access->name.c_str()));
-        event->type = NetAccessEventType::authorized;
-        event->peer = index;
-        event->device = device;
-        event->access = level;
-        event->address = session_event->address;
-        *filled = true;
         return;
     }
     peer->state = NetAccessPeerState::unpaired;
     bool open = access->accept_pairing && !refused_before(access, peer->key);
     send_control(access, index,
-                 net_message_write_pairing_needed(access->out.data(), access->out.size(), open, access->name.c_str()));
+                 net_message_write_pairing_needed(access->out.data(), access->out.size(), open, &access->info));
     if (!open && access->guest_open)
     {
         // It may be a guest (guest_hello follows at once); a pairing client
@@ -184,8 +282,6 @@ static void on_secured(NetAccess* access, const NetSessionEvent* session_event, 
     else if (!open)
     {
         // Sent first: ENet delivers queued messages before disconnecting.
-        // (A client without a code closes on its own; one with a code waits
-        // for this.)
         net_session_close(&access->session, index);
     }
 }
@@ -196,24 +292,88 @@ static void refuse_pairing(NetAccess* access, uint32_t index)
     net_session_close(&access->session, index);
 }
 
-// A pair_request: held until our user types the code (requested). Also a new
-// one after our confirm didn't match the client's code (a mistyped code).
-static void on_pair_request(NetAccess* access, uint32_t index, const uint8_t* data, size_t size, NetAccessEvent* event,
+static bool check_build(const NetAccess* access, const NetDeviceInfo* info)
+{
+    return access->verify_build != nullptr && info->record_size > 0 && access->verify_build(access->verify_user, info);
+}
+
+// What a device would get here by default: what it uses and we offer; for an
+// unsigned build not FILE TRANSFER or SETTINGS (Andrés, 2026-11-25).
+static NetCaps default_grants(const NetAccess* access, const NetAccessPeer* peer, NetCaps base)
+{
+    NetCaps grants = base & access->info.offers & peer->info.uses;
+    if (!peer->signed_build)
+    {
+        grants &= ~NET_CAPS_UNSIGNED_OFF;
+    }
+    return grants;
+}
+
+// hello from a paired device: welcome it with what it may use, and keep its
+// name, kind and build up to date.
+static void on_paired_hello(NetAccess* access, uint32_t index, const uint8_t* data, size_t size, NetAccessEvent* event,
                             bool* filled)
 {
     NetAccessPeer* peer = &access->peers[index];
-    bool retry = peer->state == NetAccessPeerState::pairing;
+    if (!net_message_read_hello(data, size, &peer->info))
+    {
+        host_log(LogLevel::warning, "Network: a paired device's hello didn't read: closed");
+        net_session_close(&access->session, index);
+        peer->state = NetAccessPeerState::none;
+        return;
+    }
+    peer->has_info = true;
+    peer->signed_build = check_build(access, &peer->info);
+    refresh_trust(access);
+    if (peer->state != NetAccessPeerState::hello_wait)
+    {
+        return;   // forgotten meanwhile (remap_peers closed it)
+    }
+    const NetTrustedDevice* known = &access->trust.devices[static_cast<size_t>(peer->device)];
+    if (known->name != peer->info.name || known->kind != peer->info.kind || known->signed_build != peer->signed_build)
+    {
+        edit_begin(access);
+        if (peer->state == NetAccessPeerState::hello_wait)
+        {
+            NetTrustedDevice* device = &access->trust.devices[static_cast<size_t>(peer->device)];
+            net_trust_rename(&access->trust, static_cast<uint32_t>(peer->device), peer->info.name);
+            device->kind = peer->info.kind;
+            device->signed_build = peer->signed_build;
+        }
+        edit_end(access);
+    }
+    if (peer->state != NetAccessPeerState::hello_wait)
+    {
+        return;
+    }
+    peer->state = NetAccessPeerState::authorized;
+    send_welcome(access, index);
+    event->type = NetAccessEventType::authorized;
+    event->device = peer->device;
+    event->caps = effective_caps(access, peer);
+    event->info = peer->info;
+    event->signed_build = peer->signed_build;
+    *filled = true;
+}
+
+// pair_ask: the device wants to pair. With a shown code it takes that one;
+// otherwise we make a code and the frontend shows it (pairing_requested). A
+// pair_ask after our pair_response is the other side saying the code was
+// wrong: a request gets a new code.
+static void on_pair_ask(NetAccess* access, uint32_t index, NetAccessEvent* event, bool* filled)
+{
+    NetAccessPeer* peer = &access->peers[index];
+    bool retry = peer->state == NetAccessPeerState::pairing || peer->state == NetAccessPeerState::requested;
     if (retry)
     {
         crypto_wipe(peer->isk, sizeof(peer->isk));
         peer->failures++;
     }
-    if (peer->failures >= NET_PAIRING_MAX_FAILURES ||
-        !net_message_read_pair_request(data, size, peer->share, &peer->want, &peer->kind, peer->name))
+    if (!peer->has_info || peer->failures >= NET_PAIRING_MAX_FAILURES)
     {
         if (peer->failures >= NET_PAIRING_MAX_FAILURES)
         {
-            host_log(LogLevel::warning, "Network: \"%s\" got the code wrong %u times, refused", peer->name,
+            host_log(LogLevel::warning, "Network: \"%s\" got the code wrong %u times, refused", peer->info.name,
                      static_cast<unsigned>(peer->failures));
         }
         refuse_pairing(access, index);
@@ -223,57 +383,88 @@ static void on_pair_request(NetAccess* access, uint32_t index, const uint8_t* da
     }
     peer->state = NetAccessPeerState::requested;
     peer->since = net_seconds();
+    if (access->showing && (!retry || peer->shown_code))
+    {
+        std::memcpy(peer->code, access->shown_code, sizeof(peer->code));
+        peer->shown_code = true;
+        peer->grants = default_grants(access, peer, access->shown_grants);
+        return;   // no dialog: the user already sees the code
+    }
+    if (!net_pair_code_generate(peer->code))
+    {
+        refuse_pairing(access, index);
+        event->type = NetAccessEventType::pairing_failed;
+        *filled = true;
+        return;
+    }
+    peer->shown_code = false;
+    if (!retry)
+    {
+        peer->grants = default_grants(access, peer, NET_CAPS_ALL);
+    }
     event->type = NetAccessEventType::pairing_requested;
-    event->access = peer->want;
-    event->kind = peer->kind;
+    std::memcpy(event->code, peer->code, sizeof(event->code));
+    event->info = peer->info;
+    event->signed_build = peer->signed_build;
+    event->caps = peer->grants;
     event->retry = retry;
-    std::snprintf(event->name, sizeof(event->name), "%s", peer->name);
     *filled = true;
 }
 
-bool net_access_answer_pairing(NetAccess* access, uint32_t index, const char* code, NetAccessLevel level)
+// pair_request: the other side's CPace share, from the code its user typed.
+// We know the code, so we answer at once.
+static void on_pair_request(NetAccess* access, uint32_t index, const uint8_t* data, size_t size)
 {
-    if (index >= NET_MAX_PEERS || access->peers[index].state != NetAccessPeerState::requested ||
-        !net_pair_code_valid(code) || static_cast<uint32_t>(level) >= NET_ACCESS_LEVEL_COUNT)
-    {
-        return false;
-    }
     NetAccessPeer* peer = &access->peers[index];
+    uint8_t their_share[NET_CPACE_SHARE_SIZE];
+    if (!net_message_read_pair_request(data, size, their_share))
+    {
+        refuse_pairing(access, index);
+        return;
+    }
     uint8_t ci[NET_PAIR_CI_SIZE];
     net_pair_ci(peer->key, access->host_key, ci);
     NetCpace cpace;
     uint8_t prs[NET_PAIR_CODE_DIGITS];
     for (size_t i = 0; i < NET_PAIR_CODE_DIGITS; i++)
     {
-        prs[i] = static_cast<uint8_t>(code[i]);
+        prs[i] = static_cast<uint8_t>(peer->code[i]);
     }
     bool started = net_cpace_start(&cpace, prs, sizeof(prs), ci, sizeof(ci), peer->handshake_hash, NET_PAIR_SID_SIZE);
     crypto_wipe(prs, sizeof(prs));
     uint8_t our_share[NET_CPACE_SHARE_SIZE];
     std::memcpy(our_share, cpace.share, sizeof(our_share));
-    // ADa = the client's name as it sent it, ADb = ours as we send it.
+    // ADa = the client's name as its hello said it, ADb = ours as we send it.
     uint8_t ad_a[NET_DEVICE_NAME_MAX];
     uint8_t ad_b[NET_DEVICE_NAME_MAX];
-    size_t ad_a_size = net_pair_name_bytes(peer->name, ad_a);
-    size_t ad_b_size = net_pair_name_bytes(access->name.c_str(), ad_b);
-    bool finished = started && net_cpace_finish(&cpace, false, peer->share, ad_a, ad_a_size, ad_b, ad_b_size,
+    size_t ad_a_size = net_pair_name_bytes(peer->info.name, ad_a);
+    size_t ad_b_size = net_pair_name_bytes(access->info.name, ad_b);
+    bool finished = started && net_cpace_finish(&cpace, false, their_share, ad_a, ad_a_size, ad_b, ad_b_size,
                                                 peer->handshake_hash, NET_PAIR_SID_SIZE, peer->isk);
     net_cpace_wipe(&cpace);
-    crypto_wipe(peer->share, sizeof(peer->share));
     if (!finished)
     {
         // A low-order share: not an honest client.
         refuse_pairing(access, index);
-        return true;   // its `closed` follows
+        return;
     }
     uint8_t confirm[NET_PAIR_CONFIRM_SIZE];
     net_pair_confirm(peer->isk, true, confirm);
     send_control(access, index,
-                 net_message_write_pair_response(access->out.data(), access->out.size(), our_share, confirm,
-                                                 access->name.c_str()));
-    peer->grant = level;
+                 net_message_write_pair_response(access->out.data(), access->out.size(), our_share, confirm));
     peer->state = NetAccessPeerState::pairing;
     peer->since = net_seconds();
+}
+
+bool net_access_set_pairing_grants(NetAccess* access, uint32_t index, NetCaps grants)
+{
+    if (index >= NET_MAX_PEERS || (access->peers[index].state != NetAccessPeerState::requested &&
+                                   access->peers[index].state != NetAccessPeerState::pairing))
+    {
+        return false;
+    }
+    NetAccessPeer* peer = &access->peers[index];
+    peer->grants = grants & access->info.offers & peer->info.uses;
     return true;
 }
 
@@ -295,14 +486,6 @@ void net_access_refuse_pairing(NetAccess* access, uint32_t index)
     refuse_pairing(access, index);
 }
 
-uint32_t net_access_add_device(NetAccess* access, const uint8_t* key, const char* name, NetAccessLevel level)
-{
-    uint32_t device = net_trust_add(&access->trust, key, name);
-    access->trust.devices[device].access = level;
-    save_trust(access);
-    return device;
-}
-
 static void on_pair_confirm(NetAccess* access, uint32_t index, const uint8_t* data, size_t size, NetAccessEvent* event,
                             bool* filled)
 {
@@ -312,6 +495,7 @@ static void on_pair_confirm(NetAccess* access, uint32_t index, const uint8_t* da
     net_pair_confirm(peer->isk, false, expected);
     bool ok = net_message_read_pair_confirm(data, size, received) && crypto_verify32(received, expected) == 0;
     crypto_wipe(peer->isk, sizeof(peer->isk));
+    crypto_wipe(peer->code, sizeof(peer->code));
     if (!ok)
     {
         // The client accepted our confirm but its own doesn't match: not an
@@ -322,23 +506,30 @@ static void on_pair_confirm(NetAccess* access, uint32_t index, const uint8_t* da
         *filled = true;
         return;
     }
-    uint32_t device = net_trust_add(&access->trust, peer->key, peer->name);
-    access->trust.devices[device].access = peer->grant;
-    save_trust(access);
-    send_control(access, index, net_message_write_pair_result(access->out.data(), access->out.size(), true));
-    // The level our user picked (the client only guessed what it asked for).
-    send_control(access, index,
-                 net_message_write_welcome(access->out.data(), access->out.size(), peer->grant, access->name.c_str()));
+    edit_begin(access);
+    uint32_t device = net_trust_add(&access->trust, peer->key, peer->info.name);
+    NetTrustedDevice* record = &access->trust.devices[device];
+    record->grants = peer->grants;
+    record->kind = peer->info.kind;
+    record->signed_build = peer->signed_build;
     peer->state = NetAccessPeerState::authorized;
     peer->device = static_cast<int32_t>(device);
-    peer->just_paired = true;
+    edit_end(access);
+    send_control(access, index, net_message_write_pair_result(access->out.data(), access->out.size(), true));
+    // What it may use here (our user's ticks ∩ what it uses).
+    send_welcome(access, index);
+    if (peer->shown_code)
+    {
+        net_access_end_code(access);   // one code, one device: the window shows who paired
+    }
     char fingerprint[32];
     net_key_fingerprint(peer->key, fingerprint, sizeof(fingerprint));
-    host_log(LogLevel::info, "Network: paired with \"%s\" (%s)", access->trust.devices[device].name.c_str(), fingerprint);
+    host_log(LogLevel::info, "Network: paired with \"%s\" (%s)", peer->info.name, fingerprint);
     event->type = NetAccessEventType::paired;
-    event->peer = index;
-    event->device = static_cast<int32_t>(device);
-    event->access = access->trust.devices[device].access;
+    event->device = peer->device;
+    event->caps = effective_caps(access, peer);
+    event->info = peer->info;
+    event->signed_build = peer->signed_build;
     *filled = true;
 }
 
@@ -346,16 +537,20 @@ static void on_pair_confirm(NetAccess* access, uint32_t index, const uint8_t* da
 // the frontend (their `closed` still does). Each is told (unpair) and
 // closed, except `unpaired_by`: the peer that unpaired itself, which closes
 // on its own (NET_NO_PEER: none did).
-static void forget_device(NetAccess* access, uint32_t device, uint32_t unpaired_by)
+static void forget_device(NetAccess* access, const uint8_t* key, uint32_t unpaired_by)
 {
-    if (device >= access->trust.devices.size())
+    edit_begin(access);
+    int32_t found = net_trust_find(&access->trust, key);
+    if (found < 0)
     {
+        net_trust_file_unlock();
         return;
     }
+    uint32_t device = static_cast<uint32_t>(found);
     for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
     {
         NetAccessPeer* peer = &access->peers[i];
-        if (peer->state != NetAccessPeerState::authorized)
+        if (peer->state != NetAccessPeerState::authorized && peer->state != NetAccessPeerState::hello_wait)
         {
             continue;
         }
@@ -379,7 +574,7 @@ static void forget_device(NetAccess* access, uint32_t device, uint32_t unpaired_
         }
     }
     net_trust_remove(&access->trust, device);
-    save_trust(access);
+    edit_end(access);
 }
 
 static bool guest_kicked(const NetAccess* access, const uint8_t* key)
@@ -458,7 +653,7 @@ static void on_guest_hello(NetAccess* access, uint32_t index, const uint8_t* dat
         access->guest_full_count++;
         host_log(LogLevel::info, "Network: guest \"%s\" came with the link, but every seat is taken", name);
         event->type = NetAccessEventType::guest_full;
-        std::snprintf(event->name, sizeof(event->name), "%s", name);
+        net_device_info_set_name(&event->info, name);
         *filled = true;
         return;
     }
@@ -472,8 +667,8 @@ static void on_guest_hello(NetAccess* access, uint32_t index, const uint8_t* dat
     event->type = NetAccessEventType::guest_joined;
     event->guest = true;
     event->guest_level = access->guest_level;
-    event->access = NetAccessLevel::stream;
-    std::snprintf(event->name, sizeof(event->name), "%s", name);
+    event->caps = NET_CAP_STREAM;
+    net_device_info_set_name(&event->info, name);
     *filled = true;
 }
 
@@ -494,6 +689,59 @@ static bool guest_may_send(const NetAccess* access, NetChannel channel, const ui
     return type == 70 || type == 71 || type == 72;   // NET_STREAM_START, STOP, KEYFRAME_REQUEST (net_stream.h)
 }
 
+// A control message from an authorized peer. True if `event` was filled.
+static bool on_authorized_control(NetAccess* access, uint32_t index, const NetSessionEvent* session_event,
+                                  NetAccessEvent* event)
+{
+    NetAccessPeer* peer = &access->peers[index];
+    const uint8_t* data = session_event->data;
+    size_t size = session_event->size;
+    uint8_t type = net_message_type(data, size);
+    if (net_message_read_unpair(data, size))
+    {
+        // The device forgot us: forget it. It closes the connection;
+        // its `closed` comes later (forgotten).
+        event->type = NetAccessEventType::unpaired;
+        event->peer = index;
+        event->device = -1;
+        event->address = session_event->address;
+        event->info = peer->info;
+        forget_device(access, peer->key, index);
+        return true;
+    }
+    NetCaps granted = 0;
+    if (net_message_read_grant(data, size, &granted))
+    {
+        edit_begin(access);
+        if (peer->state == NetAccessPeerState::authorized)
+        {
+            access->trust.devices[static_cast<size_t>(peer->device)].granted = granted;
+        }
+        edit_end(access);
+        if (peer->state != NetAccessPeerState::authorized)
+        {
+            return false;
+        }
+        event->type = NetAccessEventType::granted;
+        event->peer = index;
+        event->device = peer->device;
+        event->caps = granted;
+        event->address = session_event->address;
+        return true;
+    }
+    // Other control messages of this layer aren't the application's, and an
+    // application message needs its capability.
+    if (type < NET_MESSAGE_FIRST_APP || !net_caps_allow(effective_caps(access, peer), type))
+    {
+        if (type >= NET_MESSAGE_FIRST_APP)
+        {
+            access->dropped_by_access++;
+        }
+        return false;
+    }
+    return false;   // the caller reports it as a message
+}
+
 static bool on_message(NetAccess* access, const NetSessionEvent* session_event, NetAccessEvent* event)
 {
     uint32_t index = session_event->peer;
@@ -505,61 +753,21 @@ static bool on_message(NetAccess* access, const NetSessionEvent* session_event, 
     bool filled = false;
     if (peer->state == NetAccessPeerState::authorized)
     {
-        NetAccessLevel level = access->trust.devices[static_cast<size_t>(peer->device)].access;
         if (session_event->channel == NetChannel::control)
         {
             uint8_t type = net_message_type(session_event->data, session_event->size);
-            if (net_message_read_unpair(session_event->data, session_event->size))
+            if (on_authorized_control(access, index, session_event, event))
             {
-                // The device forgot us: forget it. It closes the connection;
-                // its `closed` comes later (forgotten).
-                uint32_t device = static_cast<uint32_t>(peer->device);
-                event->type = NetAccessEventType::unpaired;
-                event->peer = index;
-                event->device = -1;
-                event->address = session_event->address;
-                std::snprintf(event->name, sizeof(event->name), "%s", access->trust.devices[device].name.c_str());
-                forget_device(access, device, index);
                 return true;
             }
-            NetAccessLevel back = NetAccessLevel::gamepad;
-            if (net_message_read_grant_back(session_event->data, session_event->size, &back))
+            if (type < NET_MESSAGE_FIRST_APP || !net_caps_allow(effective_caps(access, peer), type) ||
+                peer->state != NetAccessPeerState::authorized)
             {
-                if (!peer->just_paired)
-                {
-                    return false;   // only right after pairing, on that connection
-                }
-                peer->just_paired = false;   // once
-                event->type = NetAccessEventType::granted_back;
-                event->peer = index;
-                event->device = peer->device;
-                event->access = back;
-                event->address = session_event->address;
-                return true;
-            }
-            if (type == static_cast<uint8_t>(NetMessage::device_name))
-            {
-                char name[NET_DEVICE_NAME_MAX + 1];
-                if (net_message_read_device_name(session_event->data, session_event->size, name) &&
-                    net_trust_rename(&access->trust, static_cast<uint32_t>(peer->device), name))
-                {
-                    save_trust(access);
-                }
-                return false;
-            }
-            // Other control messages of this layer aren't the application's,
-            // and an application message needs its level.
-            if (type < NET_MESSAGE_FIRST_APP || !net_access_allows(level, net_message_required_access(type)))
-            {
-                if (type >= NET_MESSAGE_FIRST_APP)
-                {
-                    access->dropped_by_access++;
-                }
                 return false;
             }
         }
         event->type = NetAccessEventType::message;
-        event->access = level;
+        event->caps = effective_caps(access, peer);
         event->peer = index;
         event->device = peer->device;
         event->address = session_event->address;
@@ -577,7 +785,7 @@ static bool on_message(NetAccess* access, const NetSessionEvent* session_event, 
             return false;
         }
         event->type = NetAccessEventType::message;
-        event->access = NetAccessLevel::stream;
+        event->caps = NET_CAP_STREAM;
         event->guest = true;
         event->guest_level = access->guest_level;
         event->peer = index;
@@ -593,9 +801,31 @@ static bool on_message(NetAccess* access, const NetSessionEvent* session_event, 
         return false;   // input from someone not authorized: ignored
     }
     uint8_t type = net_message_type(session_event->data, session_event->size);
-    if (peer->state == NetAccessPeerState::unpaired && type == static_cast<uint8_t>(NetGuestMessage::hello))
+    if (peer->state == NetAccessPeerState::hello_wait)
+    {
+        if (type == static_cast<uint8_t>(NetMessage::hello))
+        {
+            on_paired_hello(access, index, session_event->data, session_event->size, event, &filled);
+        }
+        else
+        {
+            host_log(LogLevel::warning, "Network: a paired device sent %u before hello: closed", static_cast<unsigned>(type));
+            refuse_pairing(access, index);   // nothing before hello
+        }
+    }
+    else if (peer->state == NetAccessPeerState::unpaired && type == static_cast<uint8_t>(NetGuestMessage::hello))
     {
         on_guest_hello(access, index, session_event->data, session_event->size, event, &filled);
+    }
+    else if (peer->state == NetAccessPeerState::unpaired && type == static_cast<uint8_t>(NetMessage::hello))
+    {
+        // A device we don't know says who it is: kept for a pair_ask.
+        peer->has_info = net_message_read_hello(session_event->data, session_event->size, &peer->info);
+        peer->signed_build = peer->has_info && check_build(access, &peer->info);
+        if (!peer->has_info)
+        {
+            refuse_pairing(access, index);
+        }
     }
     else if (peer->guest_only)
     {
@@ -603,10 +833,15 @@ static bool on_message(NetAccess* access, const NetSessionEvent* session_event, 
         net_session_close(&access->session, index);
         peer->state = NetAccessPeerState::none;
     }
-    else if ((peer->state == NetAccessPeerState::unpaired || peer->state == NetAccessPeerState::pairing) &&
-             type == static_cast<uint8_t>(NetMessage::pair_request))
+    else if ((peer->state == NetAccessPeerState::unpaired || peer->state == NetAccessPeerState::requested ||
+              peer->state == NetAccessPeerState::pairing) &&
+             net_message_read_pair_ask(session_event->data, session_event->size))
     {
-        on_pair_request(access, index, session_event->data, session_event->size, event, &filled);
+        on_pair_ask(access, index, event, &filled);
+    }
+    else if (peer->state == NetAccessPeerState::requested && type == static_cast<uint8_t>(NetMessage::pair_request))
+    {
+        on_pair_request(access, index, session_event->data, session_event->size);
     }
     else if (peer->state == NetAccessPeerState::pairing && type == static_cast<uint8_t>(NetMessage::pair_confirm))
     {
@@ -616,6 +851,8 @@ static bool on_message(NetAccess* access, const NetSessionEvent* session_event, 
     {
         // Anything else before authorization is a protocol error (its
         // `closed` tells the frontend if it was a request).
+        host_log(LogLevel::warning, "Network: message %u out of place (state %d): closed", static_cast<unsigned>(type),
+                 static_cast<int>(peer->state));
         refuse_pairing(access, index);
     }
     if (filled)
@@ -626,15 +863,15 @@ static bool on_message(NetAccess* access, const NetSessionEvent* session_event, 
     return filled;
 }
 
-// Peers stuck in a step.
+// Peers stuck in a step, and the shown code's time.
 static bool check_timers(NetAccess* access, NetAccessEvent* event)
 {
-    (void)event;
     double now = net_seconds();
     for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
     {
         NetAccessPeer* peer = &access->peers[i];
-        bool waiting = peer->state == NetAccessPeerState::unpaired || peer->state == NetAccessPeerState::pairing;
+        bool waiting = peer->state == NetAccessPeerState::unpaired || peer->state == NetAccessPeerState::pairing ||
+                       peer->state == NetAccessPeerState::hello_wait;
         bool requested = peer->state == NetAccessPeerState::requested;
         bool hello = peer->state == NetAccessPeerState::unpaired && peer->guest_only;
         if ((waiting && now - peer->since > NET_ACCESS_PAIRING_STEP_SECONDS) ||
@@ -645,6 +882,12 @@ static bool check_timers(NetAccess* access, NetAccessEvent* event)
             peer->since = now;   // closing takes a moment; don't repeat every frame
         }
     }
+    if (access->showing && now - access->shown_since > NET_ACCESS_REQUEST_SECONDS)
+    {
+        net_access_end_code(access);
+        event->type = NetAccessEventType::code_expired;
+        return true;
+    }
     return false;
 }
 
@@ -653,6 +896,7 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
     *event = {};
     net_beacon_host_update(&access->beacon, &access->session.host, net_seconds());
     net_signal_update(&access->signal, &access->session, net_seconds());
+    refresh_trust(access);
     if (check_timers(access, event))
     {
         return true;
@@ -674,7 +918,7 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
                                     session_event.address, net_seconds());
             break;
         case NetSessionEventType::secured:
-            on_secured(access, &session_event, event, &filled);
+            on_secured(access, &session_event);
             break;
         case NetSessionEventType::message:
             filled = on_message(access, &session_event, event);
@@ -697,10 +941,11 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
             NetAccessPeerState state = peer->state;
             int32_t device = peer->device;
             bool forgotten = peer->forgotten;
+            bool shown = peer->shown_code;
             peer_reset(peer);
-            if (state == NetAccessPeerState::requested || state == NetAccessPeerState::pairing)
+            if ((state == NetAccessPeerState::requested && !shown) || state == NetAccessPeerState::pairing)
             {
-                // A request went (cancelled on the client, or closed): the
+                // A request went (cancelled on the other side, or closed): the
                 // frontend closes its dialog.
                 event->type = NetAccessEventType::closed;
                 event->peer = session_event.peer;
@@ -749,8 +994,9 @@ bool net_access_send(NetAccess* access, uint32_t peer, NetChannel channel, const
         // files of this machine.
         uint8_t type = net_message_type(data, size);
         bool allowed = channel == NetChannel::stream ||
-                       (channel == NetChannel::control && (type == NET_MESSAGE_FIRST_APP ||
-                                                            (type >= NET_MESSAGE_FIRST_STREAM && type < NET_MESSAGE_FIRST_FULL)));
+                       (channel == NetChannel::control &&
+                        (type == NET_MESSAGE_FIRST_APP ||
+                         (type >= NET_MESSAGE_FIRST_STREAM && type < NET_MESSAGE_FIRST_SETTINGS)));
         return allowed && net_session_send(&access->session, peer, channel, data, size);
     }
     if (access->peers[peer].state != NetAccessPeerState::authorized)
@@ -771,25 +1017,37 @@ void net_access_close(NetAccess* access, uint32_t peer)
 
 void net_access_remove_device(NetAccess* access, uint32_t device)
 {
-    forget_device(access, device, NET_NO_PEER);
+    if (device >= access->trust.devices.size())
+    {
+        return;
+    }
+    uint8_t key[NET_KEY_SIZE];
+    std::memcpy(key, access->trust.devices[device].key, NET_KEY_SIZE);
+    forget_device(access, key, NET_NO_PEER);
 }
 
-void net_access_set_level(NetAccess* access, uint32_t device, NetAccessLevel level)
+void net_access_set_grants(NetAccess* access, uint32_t device, NetCaps grants)
 {
     if (device >= access->trust.devices.size())
     {
         return;
     }
-    access->trust.devices[device].access = level;
-    save_trust(access);
-    // A connected device gets a new welcome with its level (to show what it can use).
+    uint8_t key[NET_KEY_SIZE];
+    std::memcpy(key, access->trust.devices[device].key, NET_KEY_SIZE);
+    edit_begin(access);
+    int32_t found = net_trust_find(&access->trust, key);
+    if (found >= 0)
+    {
+        access->trust.devices[static_cast<size_t>(found)].grants = grants & NET_CAPS_ALL;
+    }
+    edit_end(access);
+    // A connected device gets a new welcome (to show what it can use).
     for (uint32_t i = 0; i < NET_MAX_PEERS; i++)
     {
-        if (access->peers[i].state == NetAccessPeerState::authorized &&
-            access->peers[i].device == static_cast<int32_t>(device))
+        if (found >= 0 && access->peers[i].state == NetAccessPeerState::authorized &&
+            access->peers[i].device == found)
         {
-            send_control(access, i,
-                         net_message_write_welcome(access->out.data(), access->out.size(), level, access->name.c_str()));
+            send_welcome(access, i);
         }
     }
 }

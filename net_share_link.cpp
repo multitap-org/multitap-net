@@ -42,6 +42,11 @@ static void on_discovered(NetShareLink* link, const NetEvent* event, double now)
         slot->address = address;
     }
     slot->name = event->discovered.name;
+    slot->kind = event->discovered.kind < NET_DEVICE_KIND_COUNT ? static_cast<NetDeviceKind>(event->discovered.kind)
+                                                                 : NetDeviceKind::piccolo;
+    slot->offers = event->discovered.offers & NET_CAPS_ALL;
+    slot->offers_known = event->discovered.version >= 2;
+    slot->signed_build = event->discovered.signed_build;
     slot->seen_at = now;
 }
 
@@ -55,7 +60,7 @@ static void discover(NetShareLink* link, double now)
     if (now >= link->next_discovery)
     {
         link->next_discovery = now + NET_SHARE_LINK_DISCOVERY_SECONDS;
-        net_host_discover(&link->discovery, NET_DEFAULT_PORT);
+        net_host_discover_devices(&link->discovery);
     }
     NetEvent event;
     while (net_host_poll(&link->discovery, &event))
@@ -92,12 +97,18 @@ static void poll_client(NetShareLink* link)
             link->state = NetShareLinkState::ready;
             link->refusal = NetClientRefusal::none;
             link->newly_paired = event.newly_paired;
-            host_log(LogLevel::info, "Network: share: connected to %s", link->client.host_name);
+            link->code_needed = false;
+            host_log(LogLevel::info, "Network: share: connected to %s", link->client.host.name);
+            break;
+        case NetClientEventType::code_needed:
+            link->code_needed = true;
+            link->code_retry = event.retry;
             break;
         case NetClientEventType::refused:
         case NetClientEventType::closed:
             net_share_client_disconnected(&link->share);
             link->state = NetShareLinkState::idle;
+            link->code_needed = false;
             if (link->closing)
             {
                 link->closing = false;   // ours: not a failure
@@ -121,12 +132,12 @@ static void poll_client(NetShareLink* link)
     {
         link->connect_pending = false;
         link->closing = false;
-        net_client_set_pairing(&link->client, NetAccessLevel::share, NetPairKind::piccolo);   // files: SHARE
+        link->code_needed = false;
+        link->code_retry = false;
         bool started = false;
         if (!link->connect_beacon)
         {
-            started = net_client_connect(&link->client, link->connect_address,
-                                         link->connect_code.empty() ? nullptr : link->connect_code.c_str());
+            started = net_client_connect(&link->client, link->connect_address, link->connect_pair);
         }
         else
         {
@@ -230,13 +241,14 @@ static void run(NetShareLink* link)
     }
 }
 
-bool net_share_link_start(NetShareLink* link, const NetKeypair* identity, const char* name, const char* hosts_path)
+bool net_share_link_start(NetShareLink* link, const NetKeypair* identity, const NetDeviceInfo* info,
+                          const char* devices_path)
 {
     if (link->running)
     {
         return true;
     }
-    if (!net_client_create(&link->client, identity, name, hosts_path))
+    if (!net_client_create(&link->client, identity, info, devices_path))
     {
         net_client_destroy(&link->client);
         return false;
@@ -301,15 +313,13 @@ bool net_share_link_started(const NetShareLink* link)
     return link->thread.joinable();
 }
 
-void net_share_link_set_folders(NetShareLink* link, const std::vector<std::string>* game_paths,
-                                const char* saves_path, const char* states_path,
-                                const char* screenshots_path)
+void net_share_link_set_folders(NetShareLink* link, const NetShareFolderPaths* paths)
 {
     std::lock_guard<std::mutex> guard(link->lock);
-    net_share_set_folders(&link->folders, game_paths, saves_path, states_path, screenshots_path);
+    net_share_set_folders(&link->folders, paths);
 }
 
-bool net_share_link_connect(NetShareLink* link, NetAddress address, const char* code)
+bool net_share_link_connect(NetShareLink* link, NetAddress address, bool pair)
 {
     std::lock_guard<std::mutex> guard(link->lock);
     if (!link->running)
@@ -332,7 +342,8 @@ bool net_share_link_connect(NetShareLink* link, NetAddress address, const char* 
     link->connect_beacon = false;
     link->connect_device = -1;
     link->connect_address = address;
-    link->connect_code = code;
+    link->connect_pair = pair;
+    link->connect_code.clear();
     link->state = NetShareLinkState::connecting;
     link->refusal = NetClientRefusal::none;
     return true;
@@ -419,16 +430,16 @@ void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status)
     }
     status->state = link->state;
     status->refusal = link->refusal;
-    status->access = link->client.access;
-    status->host_name = link->state == NetShareLinkState::ready ? link->client.host_name : "";
-    bool pairing = link->state == NetShareLinkState::connecting && link->client.has_code;
-    status->code = pairing ? link->client.code : "";
-    if (!pairing && link->state == NetShareLinkState::connecting && link->connect_pending && link->connect_device < 0)
-    {
-        status->code = link->connect_code;   // not handed to the client yet (the beacon's name being looked up)
-    }
-    status->waiting_host = pairing && (link->client.state == NetClientState::pairing ||
-                                       link->client.state == NetClientState::confirming);
+    status->caps = ready ? link->client.caps : 0;
+    status->code_needed = link->state == NetShareLinkState::connecting && link->code_needed;
+    status->code_retry = status->code_needed && link->code_retry;
+    status->host_name = ready || status->code_needed ? link->client.host.name : "";
+    status->host_kind = link->client.host.kind;
+    status->host_signed = link->client.host_signed;
+    status->checking_code = link->state == NetShareLinkState::connecting &&
+                            (link->client.state == NetClientState::pairing ||
+                             link->client.state == NetClientState::confirming);
+    status->device = ready ? link->client.device : -1;
     status->paired_online = link->client.presence_answered &&
                                     link->client.online.size() == link->client.trust.devices.size()
                                 ? link->client.online
@@ -443,6 +454,7 @@ void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status)
     {
         status->paired.push_back(link->client.trust.devices[i].name);
     }
+    status->paired_devices = link->client.trust.devices;
 }
 
 void net_share_link_list(NetShareLink* link, const char* path)
@@ -490,26 +502,27 @@ void net_share_link_take_done(NetShareLink* link, std::vector<NetShareClientDone
     done->swap(link->share.done);
 }
 
-bool net_share_link_grant_back(NetShareLink* link, NetAccessLevel level)
+bool net_share_link_set_grants(NetShareLink* link, uint32_t device, NetCaps grants)
 {
     std::lock_guard<std::mutex> guard(link->lock);
-    if (!link->running || !link->newly_paired)
+    if (!link->running || device >= link->client.trust.devices.size())
     {
         return false;
     }
-    link->newly_paired = false;   // once
-    return net_client_grant_back(&link->client, level);
+    link->newly_paired = false;   // the DONE screen's ticks are in
+    net_client_set_grants(&link->client, device, grants);
+    return true;
 }
 
-bool net_share_link_add_host(NetShareLink* link, const uint8_t* key, const char* name)
+bool net_share_link_enter_code(NetShareLink* link, const char* code)
 {
     std::lock_guard<std::mutex> guard(link->lock);
-    if (!link->running)
+    if (!link->running || !link->code_needed || !net_client_enter_code(&link->client, code))
     {
         return false;
     }
-    net_trust_add(&link->client.trust, key, name);
-    return net_trust_save(&link->client.trust, link->client.trust_path.c_str());
+    link->code_needed = false;
+    return true;
 }
 
 bool net_share_link_forget_host(NetShareLink* link, uint32_t device)

@@ -90,12 +90,14 @@ enum class NetShareKind : uint8_t
     saves,    // root listing: SAVES (<core>/<game>.srm ...)
     states,   // root listing: STATES (<core>/<game>.stateN + .png)
     screenshots,   // root listing: SCREENSHOTS (no save / state lookup)
+    recordings,    // root listing: RECORDINGS
+    config,        // root listing: CONFIG (configs that don't depend on the device: remaps, overrides...)
 };
 // Kinds this build knows. A list_result with a kind past these (a newer
 // build's folder kind) reads it as a plain folder, so new kinds can be added
 // without breaking older readers. Builds before SCREENSHOTS refused the whole
 // listing instead; none of those were released.
-constexpr uint8_t NET_SHARE_KIND_COUNT = 6;
+constexpr uint8_t NET_SHARE_KIND_COUNT = 8;
 
 struct NetShareEntry
 {

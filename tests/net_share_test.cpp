@@ -31,9 +31,9 @@ static void test_types()
     for (uint32_t type = static_cast<uint32_t>(NetShareMessage::list_request);
          type <= static_cast<uint32_t>(NetShareMessage::cancel); type++)
     {
-        if (net_message_required_access(static_cast<uint8_t>(type)) != NetAccessLevel::share)
+        if (net_message_required_cap(static_cast<uint8_t>(type)) != NET_CAP_SHARE)
         {
-            std::printf("FAIL share type %u doesn't need owner\n", type);
+            std::printf("FAIL share type %u doesn't need SHARE\n", type);
             g_failures++;
         }
     }

@@ -41,6 +41,7 @@ struct _ENetPacket;
 struct NetRtc;
 
 constexpr uint16_t NET_DEFAULT_PORT = 55420;
+constexpr uint16_t NET_PICCOLINO_PORT = 55421;   // piccolino listens here (discovery asks both)
 constexpr uint32_t NET_MAX_PEERS = 8;
 constexpr uint32_t NET_NO_PEER = UINT32_MAX;
 constexpr uint32_t NET_MAX_DISCOVERED = 16;   // replies kept between two polls; more are dropped
@@ -129,6 +130,9 @@ struct NetHost
     _ENetHost*  enet = nullptr;
     bool        listener = false;
     std::string name;                  // answered to discovery requests (listener)
+    uint8_t     discovery_kind = 0;    // and these with it (net_host_set_discovery_info)
+    uint32_t    discovery_offers = 0;
+    bool        discovery_signed = false;
     _ENetPacket* held_packet = nullptr;   // the last `received` packet, freed at the next poll
     uint32_t    discovery_nonce = 0;   // of our last request (client)
     NetDiscoveryReply discovered[NET_MAX_DISCOVERED];
@@ -167,6 +171,11 @@ bool net_host_poll(NetHost* host, NetEvent* event);
 // Client: ask every listener on the LAN (IPv4 broadcast to 255.255.255.255:`port`),
 // or one address. Replies come back as `discovered` events.
 bool net_host_discover(NetHost* host, uint16_t port);
+// To both ports devices listen on (NET_DEFAULT_PORT, NET_PICCOLINO_PORT), one
+// request (the same nonce).
+bool net_host_discover_devices(NetHost* host);
+// A listener: what it answers besides its name (net_discovery.h).
+void net_host_set_discovery_info(NetHost* host, uint8_t kind, uint32_t offers, bool signed_build);
 bool net_host_discover_at(NetHost* host, NetAddress address);
 
 // One datagram of our own (a beacon message) on the host's socket, outside

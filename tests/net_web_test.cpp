@@ -62,6 +62,18 @@ static void check(bool condition, const char* what)
     }
 }
 
+// A device as these tests describe it: a piccolo (offers everything) or a
+// phone (offers nothing), using everything they could.
+static NetDeviceInfo test_device(const char* name, bool phone)
+{
+    NetDeviceInfo info;
+    net_device_info_set_name(&info, name);
+    info.kind = phone ? NetDeviceKind::piccoletto : NetDeviceKind::piccolo;
+    info.offers = phone ? 0 : NET_CAPS_ALL;
+    info.uses = NET_CAPS_ALL;
+    return info;
+}
+
 static void sleep_ms(int milliseconds)
 {
     std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
@@ -204,9 +216,11 @@ static void test_flow(const char* url)
 
     NetAccess* access = new NetAccess();
     NetClient* phone = new NetClient();
-    check(net_access_create(access, 0, "LIVING ROOM", &host_key, "/tmp/net_web/host_devices.cfg"), "access created");
+    NetDeviceInfo host_info = test_device("LIVING ROOM", false);
+    check(net_access_create(access, 0, &host_info, &host_key, "/tmp/net_web/host_devices.cfg"), "access created");
     check(net_access_set_signal(access, url, nullptr), "access signals");
-    check(net_client_create(phone, &client_key, "PHONE", "/tmp/net_web/client_hosts.cfg"), "client created");
+    NetDeviceInfo phone_info = test_device("PHONE", true);
+    check(net_client_create(phone, &client_key, &phone_info, "/tmp/net_web/client_hosts.cfg"), "client created");
     net_client_set_signal(phone, url, nullptr);
     bool access_ready = false;
     for (int i = 0; i < 1000 && !access_ready; i++)
@@ -252,12 +266,12 @@ static void test_flow(const char* url)
     NetKeypair tablet_key;
     net_keypair_generate(&tablet_key);
     NetClient* tablet = new NetClient();
-    check(net_client_create(tablet, &tablet_key, "TABLET", "/tmp/net_web/tablet_hosts.cfg"), "tablet created");
+    NetDeviceInfo tablet_info = test_device("TABLET", true);
+    check(net_client_create(tablet, &tablet_key, &tablet_info, "/tmp/net_web/tablet_hosts.cfg"), "tablet created");
     net_client_set_signal(tablet, url, nullptr);
     char code[NET_PAIR_CODE_DIGITS + 1];
-    net_pair_code_generate(code);
-    check(net_client_pair_beacon(tablet, nullptr, 0, code), "tablet waits in its room");
-    check(net_access_invite(access, code), "host's user types the code");
+    check(net_access_show_code(access, NET_CAPS_ALL, code), "the host shows a code");
+    check(net_client_pair_beacon(tablet, nullptr, 0, code), "the tablet's user types it");
     bool tablet_ready = false;
     bool host_paired = false;
     for (int i = 0; i < 3000 && !(tablet_ready && host_paired); i++)
@@ -266,10 +280,6 @@ static void test_flow(const char* url)
         while (net_access_poll(access, &access_event))
         {
             host_paired = host_paired || access_event.type == NetAccessEventType::paired;
-            if (access_event.type == NetAccessEventType::pairing_requested)
-            {
-                net_access_answer_pairing(access, access_event.peer, code, NetAccessLevel::gamepad);
-            }
         }
         NetClientEvent tablet_event;
         while (net_client_poll(tablet, &tablet_event))
@@ -309,7 +319,8 @@ static int run_fixed_host(const char* url, const char* dir)
     net_trust_add(&trust, client_key.public_key, "FIXED CLIENT");
     net_trust_save(&trust, devices.c_str());
     NetAccess* access = new NetAccess();
-    check(net_access_create(access, 0, FIXED_HOST_NAME, &host_key, devices.c_str()), "fixed host created");
+    NetDeviceInfo fixed_host = test_device(FIXED_HOST_NAME, false);
+    check(net_access_create(access, 0, &fixed_host, &host_key, devices.c_str()), "fixed host created");
     check(net_access_set_signal(access, url, nullptr), "fixed host signals");
     bool authorized = false;
     for (int i = 0; i < 60000 / 5 && !authorized; i++)
@@ -348,7 +359,8 @@ static void run_fixed_client(const char* url, const char* dir, const char* udp_s
     net_trust_add(&hosts, host_key.public_key, "FIXED HOST");
     net_trust_save(&hosts, hosts_file.c_str());
     NetClient* client = new NetClient();
-    check(net_client_create(client, &client_key, FIXED_CLIENT_NAME, hosts_file.c_str()), "fixed client created");
+    NetDeviceInfo fixed_client = test_device(FIXED_CLIENT_NAME, true);
+    check(net_client_create(client, &client_key, &fixed_client, hosts_file.c_str()), "fixed client created");
     net_client_set_signal(client, url, nullptr);
     NetAddress servers[4];
     uint32_t count = 0;

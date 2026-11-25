@@ -272,9 +272,11 @@ int main(int argc, char** argv)
     host_fs_make_directories(saves.c_str());
     host_fs_make_directories(states.c_str());
     NetShareFolders folders;
-    std::vector<std::string> game_paths;
-    game_paths.push_back(games);
-    net_share_set_folders(&folders, &game_paths, saves.c_str(), states.c_str(), "");
+    NetShareFolderPaths paths;
+    paths.games.push_back(games);
+    paths.saves = saves;
+    paths.states = states;
+    net_share_set_folders(&folders, &paths);
 
     NetShareEngine sender;
     NetShareEngine receiver;

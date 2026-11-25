@@ -10,12 +10,21 @@
 // hard (Android needs a MulticastLock and filters them with the screen off);
 // sending one and getting a unicast answer is not.
 //
-// Layout (little-endian, fixed offsets):
+// Layout (little-endian, fixed offsets), version 2 (2026-11-25):
 //   REQUEST  "MTAP" | type 1 | version | 0 0 | nonce (u32)            12 bytes
 //   REPLY    "MTAP" | type 2 | version | 0 0 | nonce (u32)
-//            | port (u16) | name length (u8) | name (UTF-8, no NUL)   15 + name
+//            | port (u16) | kind (u8) | offers (u32) | flags (u8)
+//            | name length (u8) | name (UTF-8, no NUL)                21 + name
 // The nonce lets a client match replies to its own request and ignore stale
 // ones. `port` is where the host's ENet listens (today the same port).
+// `kind` and `offers` say what the device is and what it serves (net_trust.h:
+// NetDeviceKind, NetCaps), so a device lists only those it can use (Andrés,
+// 2026-11-25: offers go in discovery, never through the beacon). flags bit 0:
+// it says it's a signed build (only a hint for the list: the build proof is
+// checked once connected). A version 1 reply (port and name only) still reads,
+// with no kind or offers.
+// Requests go to both ports a device may listen on: NET_DEFAULT_PORT
+// (piccolo) and NET_PICCOLINO_PORT (piccolino).
 //
 // Why ENet never mistakes these for its own packets (they share the socket,
 // and our check runs first, see net_host.cpp): ENet reads the first two bytes
@@ -26,16 +35,21 @@
 #include <cstddef>
 #include <cstdint>
 
-constexpr uint8_t NET_DISCOVERY_VERSION = 1;
+constexpr uint8_t NET_DISCOVERY_VERSION = 2;
 constexpr size_t  NET_DISCOVERY_MAX_NAME = 63;   // bytes of UTF-8
 constexpr size_t  NET_DISCOVERY_REQUEST_SIZE = 12;
-constexpr size_t  NET_DISCOVERY_REPLY_HEADER_SIZE = 15;
+constexpr size_t  NET_DISCOVERY_REPLY_HEADER_SIZE = 21;
+constexpr size_t  NET_DISCOVERY_V1_REPLY_HEADER_SIZE = 15;
 constexpr size_t  NET_DISCOVERY_MAX_PACKET = NET_DISCOVERY_REPLY_HEADER_SIZE + NET_DISCOVERY_MAX_NAME;
 
 struct NetDiscoveryReply
 {
+    uint8_t  version = NET_DISCOVERY_VERSION;   // 1: an old device (no kind, no offers)
     uint32_t nonce = 0;
     uint16_t port = 0;
+    uint8_t  kind = 0;          // NetDeviceKind
+    uint32_t offers = 0;        // NetCaps
+    bool     signed_build = false;
     char     name[NET_DISCOVERY_MAX_NAME + 1] = {};   // NUL-terminated
 };
 
@@ -46,6 +60,7 @@ size_t net_discovery_write_request(uint8_t* out, size_t capacity, uint32_t nonce
 size_t net_discovery_write_reply(uint8_t* out, size_t capacity, const NetDiscoveryReply* reply);
 
 // False (silently: anyone can send anything to an open port) when the data
-// isn't exactly that packet of our version.
+// isn't exactly that packet (a request of our version; a reply of version 1
+// or 2).
 bool net_discovery_read_request(const uint8_t* data, size_t size, uint32_t* nonce);
 bool net_discovery_read_reply(const uint8_t* data, size_t size, NetDiscoveryReply* reply);

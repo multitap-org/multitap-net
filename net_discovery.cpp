@@ -43,18 +43,19 @@ static void write_header(uint8_t* out, uint8_t type, uint32_t nonce)
     write_u32(out + 8, nonce);
 }
 
-static bool read_header(const uint8_t* data, size_t size, uint8_t type, uint32_t* nonce)
+// `version`: the packet's (any; the caller decides which it reads).
+static bool read_header(const uint8_t* data, size_t size, uint8_t type, uint32_t* nonce, uint8_t* version)
 {
     if (size < NET_DISCOVERY_REQUEST_SIZE)
     {
         return false;
     }
-    if (std::memcmp(data, MAGIC, sizeof(MAGIC)) != 0 || data[4] != type || data[5] != NET_DISCOVERY_VERSION ||
-        data[6] != 0 || data[7] != 0)
+    if (std::memcmp(data, MAGIC, sizeof(MAGIC)) != 0 || data[4] != type || data[6] != 0 || data[7] != 0)
     {
         return false;
     }
     *nonce = read_u32(data + 8);
+    *version = data[5];
     return true;
 }
 
@@ -74,7 +75,8 @@ bool net_discovery_read_request(const uint8_t* data, size_t size, uint32_t* nonc
     {
         return false;
     }
-    return read_header(data, size, TYPE_REQUEST, nonce);
+    uint8_t version = 0;
+    return read_header(data, size, TYPE_REQUEST, nonce, &version) && version == NET_DISCOVERY_VERSION;
 }
 
 size_t net_discovery_write_reply(uint8_t* out, size_t capacity, const NetDiscoveryReply* reply)
@@ -88,36 +90,73 @@ size_t net_discovery_write_reply(uint8_t* out, size_t capacity, const NetDiscove
     }
     write_header(out, TYPE_REPLY, reply->nonce);
     write_u16(out + 12, reply->port);
-    out[14] = static_cast<uint8_t>(name_length);
+    out[14] = reply->kind;
+    write_u32(out + 15, reply->offers);
+    out[19] = reply->signed_build ? 1 : 0;
+    out[20] = static_cast<uint8_t>(name_length);
     std::memcpy(out + NET_DISCOVERY_REPLY_HEADER_SIZE, reply->name, name_length);
     return size;
 }
 
-bool net_discovery_read_reply(const uint8_t* data, size_t size, NetDiscoveryReply* reply)
+// The name after `header` bytes: its length byte is at header - 1.
+static bool read_reply_name(const uint8_t* data, size_t size, size_t header, NetDiscoveryReply* reply)
 {
-    if (size < NET_DISCOVERY_REPLY_HEADER_SIZE || size > NET_DISCOVERY_MAX_PACKET)
-    {
-        return false;
-    }
-    uint32_t nonce = 0;
-    if (!read_header(data, size, TYPE_REPLY, &nonce))
-    {
-        return false;
-    }
-    size_t name_length = data[14];
-    if (size != NET_DISCOVERY_REPLY_HEADER_SIZE + name_length)
+    size_t name_length = data[header - 1];
+    if (name_length > NET_DISCOVERY_MAX_NAME || size != header + name_length)
     {
         return false;
     }
     // A NUL inside would cut the name short where we show it: refuse.
-    if (std::memchr(data + NET_DISCOVERY_REPLY_HEADER_SIZE, 0, name_length) != nullptr)
+    if (std::memchr(data + header, 0, name_length) != nullptr)
     {
         return false;
     }
-    *reply = {};
-    reply->nonce = nonce;
-    reply->port = read_u16(data + 12);
-    std::memcpy(reply->name, data + NET_DISCOVERY_REPLY_HEADER_SIZE, name_length);
+    std::memcpy(reply->name, data + header, name_length);
     reply->name[name_length] = '\0';
+    return true;
+}
+
+bool net_discovery_read_reply(const uint8_t* data, size_t size, NetDiscoveryReply* reply)
+{
+    if (size > NET_DISCOVERY_MAX_PACKET)
+    {
+        return false;
+    }
+    uint32_t nonce = 0;
+    uint8_t version = 0;
+    if (!read_header(data, size, TYPE_REPLY, &nonce, &version))
+    {
+        return false;
+    }
+    NetDiscoveryReply read;
+    read.version = version;
+    read.nonce = nonce;
+    if (version == 1)
+    {
+        if (size < NET_DISCOVERY_V1_REPLY_HEADER_SIZE)
+        {
+            return false;
+        }
+        read.port = read_u16(data + 12);
+        if (!read_reply_name(data, size, NET_DISCOVERY_V1_REPLY_HEADER_SIZE, &read))
+        {
+            return false;
+        }
+        *reply = read;
+        return true;
+    }
+    if (version != NET_DISCOVERY_VERSION || size < NET_DISCOVERY_REPLY_HEADER_SIZE || data[19] > 1)
+    {
+        return false;
+    }
+    read.port = read_u16(data + 12);
+    read.kind = data[14];
+    read.offers = read_u32(data + 15);
+    read.signed_build = data[19] == 1;
+    if (!read_reply_name(data, size, NET_DISCOVERY_REPLY_HEADER_SIZE, &read))
+    {
+        return false;
+    }
+    *reply = read;
     return true;
 }

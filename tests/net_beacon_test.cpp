@@ -32,6 +32,18 @@ static void check(bool condition, const char* what)
     }
 }
 
+// A device as these tests describe it: a piccolo (offers everything) or a
+// phone (offers nothing), using everything they could.
+static NetDeviceInfo test_device(const char* name, bool phone)
+{
+    NetDeviceInfo info;
+    net_device_info_set_name(&info, name);
+    info.kind = phone ? NetDeviceKind::piccoletto : NetDeviceKind::piccolo;
+    info.offers = phone ? 0 : NET_CAPS_ALL;
+    info.uses = NET_CAPS_ALL;
+    return info;
+}
+
 struct World
 {
     std::string  invite_code;   // the code the host's user typed in INVITE: answers requests with it
@@ -65,10 +77,7 @@ static void pump(World* world)
         {
             world->host_paired = true;
         }
-        if (host_event.type == NetAccessEventType::pairing_requested && !world->invite_code.empty())
-        {
-            net_access_answer_pairing(world->host, host_event.peer, world->invite_code.c_str(), NetAccessLevel::gamepad);
-        }
+        // (Pairing across the internet uses the shown code: no request.)
     }
     if (world->client != nullptr)
     {
@@ -183,7 +192,8 @@ static void test_end_to_end(const std::string& dir)
     net_trust_save(&hosts, client_trust.c_str());
 
     world.host = new NetAccess();
-    check(net_access_create(world.host, 0, "LIVING ROOM", &host_key, host_trust.c_str()), "host created");
+    NetDeviceInfo host_info = test_device("LIVING ROOM", false);
+    check(net_access_create(world.host, 0, &host_info, &host_key, host_trust.c_str()), "host created");
     check(net_access_beacon_status(world.host) == NetBeaconStatus::off, "beacon off until set");
     net_access_set_beacon(world.host, &world.beacon_address, 1);
     bool registered = false;
@@ -197,7 +207,8 @@ static void test_end_to_end(const std::string& dir)
     check(world.server.stats.ids_accepted >= 1, "the beacon holds the id");
 
     world.client = new NetClient();
-    check(net_client_create(world.client, &client_key, "PHONE", client_trust.c_str()), "client created");
+    NetDeviceInfo phone_info = test_device("PHONE", true);
+    check(net_client_create(world.client, &client_key, &phone_info, client_trust.c_str()), "client created");
     check(net_client_connect_beacon(world.client, &world.beacon_address, 1, 0), "meeting through the beacon");
     check(pump_until(&world, &world.client_ready, 8000), "client ready through the beacon");
     check(pump_until(&world, &world.host_authorized, 2000), "host saw the paired device");
@@ -215,7 +226,7 @@ static void test_end_to_end(const std::string& dir)
     net_trust_save(&stranger_hosts, stranger_trust.c_str());
     world.client = new NetClient();
     world.client_refused = false;
-    net_client_create(world.client, &client_key, "PHONE", stranger_trust.c_str());
+    net_client_create(world.client, &client_key, &phone_info, stranger_trust.c_str());
     check(net_client_connect_beacon(world.client, &world.beacon_address, 1, 0), "meeting an unknown host");
     check(pump_until(&world, &world.client_refused, 3000), "refused");
     check(world.refusal == NetClientRefusal::host_offline, "as host_offline");
@@ -225,7 +236,7 @@ static void test_end_to_end(const std::string& dir)
     // No beacon there: beacon_unreachable after the meeting time.
     world.client = new NetClient();
     world.client_refused = false;
-    net_client_create(world.client, &client_key, "PHONE", client_trust.c_str());
+    net_client_create(world.client, &client_key, &phone_info, client_trust.c_str());
     NetAddress nowhere = world.beacon_address;
     nowhere.port = static_cast<uint16_t>(nowhere.port + 2);
     check(net_client_connect_beacon(world.client, &nowhere, 1, 0), "meeting through a missing beacon");
@@ -235,8 +246,9 @@ static void test_end_to_end(const std::string& dir)
     delete world.client;
     world.client = nullptr;
 
-    // Pairing across the internet (2026-11-22): the client shows a code and
-    // waits in its slot's pairing room; the host's user types it in INVITE.
+    // Pairing across the internet (2026-11-25): the host shows a code
+    // (GENERATE PAIRING CODE) and waits in its slot's pairing room; the
+    // tablet's user types it and meets the host there.
     NetKeypair tablet_key;
     net_keypair_generate(&tablet_key);
     std::string tablet_trust = dir + "/tablet_hosts.cfg";
@@ -245,7 +257,8 @@ static void test_end_to_end(const std::string& dir)
     world.client = new NetClient();
     world.client_refused = false;
     world.client_ready = false;
-    net_client_create(world.client, &tablet_key, "TABLET", tablet_trust.c_str());
+    NetDeviceInfo tablet_info = test_device("TABLET", true);
+    net_client_create(world.client, &tablet_key, &tablet_info, tablet_trust.c_str());
     char code[NET_PAIR_CODE_DIGITS + 1];
     net_pair_code_generate(code);
     check(net_client_pair_beacon(world.client, &world.beacon_address, 1, code), "the client waits for a host");
@@ -255,16 +268,18 @@ static void test_end_to_end(const std::string& dir)
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     check(!world.client_refused && world.client->state == NetClientState::meeting,
-          "nobody typed it yet: still waiting (no host_offline)");
+          "nobody shows that code: still waiting (no host_offline)");
+    net_client_close(world.client);
+    check(net_access_show_code(world.host, NET_CAPS_ALL, code), "the host shows a code");
     world.invite_code = code;
-    check(net_access_invite(world.host, code), "the host's user types the code in INVITE");
+    check(net_client_pair_beacon(world.client, &world.beacon_address, 1, code), "the tablet's user types it");
     check(pump_until(&world, &world.client_ready, 12000), "client paired and ready");
     check(world.newly_paired, "as newly paired");
     check(pump_until(&world, &world.host_paired, 2000), "host saw the new device");
     check(world.client->trust.devices.size() == 1 &&
               std::memcmp(world.client->trust.devices[0].key, host_key.public_key, NET_KEY_SIZE) == 0,
           "the client keeps the host's key");
-    net_access_end_invite(world.host);
+    check(!world.host->showing, "the shown code ended once it paired a device");
     world.invite_code.clear();
 
     // Presence: the host registers the tablet's meeting id now, so the

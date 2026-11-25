@@ -54,26 +54,41 @@ static void add_root(NetShareFolders* folders, const char* path, const std::stri
     folders->roots.push_back(root);
 }
 
-void net_share_set_folders(NetShareFolders* folders, const std::vector<std::string>* game_paths,
-                           const char* saves_path, const char* states_path,
-                           const char* screenshots_path)
+// Never shown in CONFIG (design 11.8): what makes this device this device.
+static const char* const CONFIG_REFUSED[] = {"net_identity.cfg", "net_devices.cfg", "net_hosts.cfg",
+                                             "net_hosts.cfg.old", "cache"};
+
+void net_share_set_folders(NetShareFolders* folders, const NetShareFolderPaths* paths)
 {
     folders->roots.clear();
     folders->listed_path.clear();
     folders->listed.clear();
-    // SAVES, STATES and SCREENSHOTS are named first, so a game folder can't
-    // take their names; they're listed after the game folders.
+    folders->config_refused.clear();
+    for (size_t i = 0; i < sizeof(CONFIG_REFUSED) / sizeof(CONFIG_REFUSED[0]); i++)
+    {
+        folders->config_refused.push_back(CONFIG_REFUSED[i]);
+    }
+    for (size_t i = 0; i < paths->config_refused.size(); i++)
+    {
+        folders->config_refused.push_back(paths->config_refused[i]);
+    }
+    // The fixed folders are named first, so a game folder can't take their
+    // names; they're listed after the game folders.
     std::string saves_name = "SAVES";
     std::string states_name = "STATES";
     std::string screenshots_name = "SCREENSHOTS";
-    add_root(folders, saves_path, &saves_name, NetShareKind::saves);
-    add_root(folders, states_path, &states_name, NetShareKind::states);
-    add_root(folders, screenshots_path, &screenshots_name, NetShareKind::screenshots);
+    std::string recordings_name = "RECORDINGS";
+    std::string config_name = "CONFIG";
+    add_root(folders, paths->saves.c_str(), &saves_name, NetShareKind::saves);
+    add_root(folders, paths->states.c_str(), &states_name, NetShareKind::states);
+    add_root(folders, paths->screenshots.c_str(), &screenshots_name, NetShareKind::screenshots);
+    add_root(folders, paths->recordings.c_str(), &recordings_name, NetShareKind::recordings);
+    add_root(folders, paths->config.c_str(), &config_name, NetShareKind::config);
     size_t fixed = folders->roots.size();
-    for (size_t i = 0; i < game_paths->size(); i++)
+    for (size_t i = 0; i < paths->games.size(); i++)
     {
-        std::string base = net_content_folder_name(&(*game_paths)[i]);
-        add_root(folders, (*game_paths)[i].c_str(), &base, NetShareKind::games);
+        std::string base = net_content_folder_name(&paths->games[i]);
+        add_root(folders, paths->games[i].c_str(), &base, NetShareKind::games);
     }
     std::rotate(folders->roots.begin(), folders->roots.begin() + static_cast<std::ptrdiff_t>(fixed),
                 folders->roots.end());
@@ -92,8 +107,45 @@ static std::string join(const std::string* folder, const std::string* name)
     return *folder + "/" + *name;
 }
 
+static bool same_ignoring_case(const std::string* a, const std::string* b)
+{
+    if (a->size() != b->size())
+    {
+        return false;
+    }
+    for (size_t i = 0; i < a->size(); i++)
+    {
+        char x = (*a)[i];
+        char y = (*b)[i];
+        x = x >= 'A' && x <= 'Z' ? static_cast<char>(x - 'A' + 'a') : x;
+        y = y >= 'A' && y <= 'Z' ? static_cast<char>(y - 'A' + 'a') : y;
+        if (x != y)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A name CONFIG never shows (any depth), ignoring case (Windows' disks do).
+static bool config_refused(const NetShareFolders* folders, const NetShareRoot* root, const std::string* name)
+{
+    if (root->kind != NetShareKind::config)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < folders->config_refused.size(); i++)
+    {
+        if (same_ignoring_case(name, &folders->config_refused[i]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 // A virtual path split and checked: every part safe, the first naming a
-// root. Nothing on disk is touched.
+// root, none a name CONFIG refuses. Nothing on disk is touched.
 static NetShareStatus split_checked(const NetShareFolders* folders, const char* path, std::vector<std::string>* parts,
                                     const NetShareRoot** root)
 {
@@ -118,7 +170,19 @@ static NetShareStatus split_checked(const NetShareFolders* folders, const char* 
             *root = &folders->roots[i];
         }
     }
-    return *root != nullptr ? NetShareStatus::ok : NetShareStatus::not_found;
+    if (*root == nullptr)
+    {
+        return NetShareStatus::not_found;
+    }
+    for (size_t i = 1; i < parts->size(); i++)
+    {
+        if (config_refused(folders, *root, &(*parts)[i]))
+        {
+            host_log(LogLevel::warning, "Network: share: \"%s\" isn't shared in CONFIG", path);
+            return NetShareStatus::not_found;   // as if it weren't there
+        }
+    }
+    return NetShareStatus::ok;
 }
 
 // An existing path inside the shared folders: its canonical host path.
@@ -246,9 +310,9 @@ NetShareStatus net_share_list(const NetShareFolders* folders, const char* path, 
     for (size_t i = 0; i < listed.size(); i++)
     {
         const HostFsEntry* item = &listed[i];
-        if (item->name.empty() || item->name[0] == '.')
+        if (item->name.empty() || item->name[0] == '.' || config_refused(folders, root, &item->name))
         {
-            continue;   // hidden (part files included)
+            continue;   // hidden (part files included), or never shared in CONFIG
         }
         if (item->is_symlink)
         {

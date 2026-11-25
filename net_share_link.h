@@ -3,8 +3,8 @@
 // A frontend's connection to another piccolo, as its client, for
 // piccolo-share (net_share_client.h): on its own thread like net_service
 // (NetClient polled about every millisecond, so copies aren't paced by the
-// frontend's frames), with LAN discovery to find piccolos and the 6-digit
-// pairing for a new one. piccolo is a host for phones and other piccolos and
+// frontend's frames), with LAN discovery to find piccolos and pairing for a
+// new one (the other side shows a code, our user types it: net_pairing.h). piccolo is a host for phones and other piccolos and
 // at the same time, through this, a client of one other piccolo: two
 // sockets (its listener and this one's ephemeral port).
 //
@@ -28,9 +28,13 @@ constexpr double   NET_SHARE_LINK_FOUND_SECONDS = 10.0;      // a piccolo not he
 
 struct NetShareLinkFound
 {
-    std::string name;
-    NetAddress  address;
-    double      seen_at = 0.0;
+    std::string   name;
+    NetAddress    address;
+    NetDeviceKind kind = NetDeviceKind::piccolo;
+    NetCaps       offers = 0;      // what it serves (discovery v2; 0 from an old device)
+    bool          offers_known = false;
+    bool          signed_build = false;   // what it says (checked once connected)
+    double        seen_at = 0.0;
 };
 
 enum class NetShareLinkState : uint8_t
@@ -38,7 +42,7 @@ enum class NetShareLinkState : uint8_t
     off,          // not started
     idle,         // not connected
     connecting,   // connecting or pairing
-    ready,        // connected: `access` says what we may do there
+    ready,        // connected: `caps` says what we may use there
 };
 
 // What the frontend shows (a copy, taken under the lock).
@@ -46,14 +50,19 @@ struct NetShareLinkStatus
 {
     NetShareLinkState state = NetShareLinkState::off;
     NetClientRefusal  refusal = NetClientRefusal::none;   // why the last try ended
-    NetAccessLevel    access = NetAccessLevel::gamepad;
-    std::string       host_name;
-    std::string       code;        // while pairing: the code to show (the host's user types it), else ""
-    bool              waiting_host = false;   // pairing: the host has our request, its user hasn't typed yet
+    NetCaps           caps = 0;            // ready: what the host lets us use there
+    std::string       host_name;           // ready, or code_needed: the host's name
+    NetDeviceKind     host_kind = NetDeviceKind::piccolo;
+    bool              host_signed = false;
+    bool              code_needed = false; // pairing: show TYPE THE CODE SHOWN ON <host_name> and take the code
+    bool              code_retry = false;  // code_needed: the last one was wrong
+    bool              checking_code = false;   // pairing: the typed code is being checked
     std::vector<NetShareLinkFound> found;   // piccolos on the LAN, newest first
-    std::vector<std::string> paired;        // the piccolos we paired with (net_share_link_connect_paired's index)
+    std::vector<std::string> paired;        // the devices we paired with (net_share_link_connect_paired's index)
+    std::vector<NetTrustedDevice> paired_devices;   // the same, whole records (both directions)
     std::vector<uint8_t>     paired_online; // per `paired`: on the beacon now (1) or not (0); empty = unknown
-    bool              newly_paired = false;   // ready: paired on this connection (access back may follow)
+    bool              newly_paired = false;   // ready: paired on this connection (the DONE screen's ticks follow)
+    int32_t           device = -1;            // ready: the host's index in `paired`
     uint8_t           host_key[NET_KEY_SIZE] = {};   // ready: the host's key
 };
 
@@ -79,10 +88,14 @@ struct NetShareLink
     bool        closing = false;
     bool        connect_pending = false;
     NetAddress  connect_address;
+    bool        connect_pair = false;   // the pending LAN connect may pair
     std::string connect_code;
     // Across the internet (through the beacon): the pending connect is to
-    // paired host `connect_device`, or pairs (`connect_device` -1) with our
-    // `connect_code` in its pairing room (the other side's INVITE).
+    // paired host `connect_device`, or pairs (`connect_device` -1) with
+    // `connect_code`, typed by our user, in the pairing room of the device
+    // showing it (GENERATE PAIRING CODE there).
+    bool        code_needed = false;    // the client asked for a code (code_needed), our user hasn't typed it
+    bool        code_retry = false;
     bool        connect_beacon = false;
     int32_t     connect_device = -1;
     std::string connect_beacon_name;    // the beacon used for it ("name" or "name:port")
@@ -105,40 +118,39 @@ struct NetShareLink
     uint32_t          found_count = 0;
 };
 
-// `hosts_path`: the piccolos we paired with (net_trust format), loaded now.
-bool net_share_link_start(NetShareLink* link, const NetKeypair* identity, const char* name, const char* hosts_path);
+// `info`: this device. `devices_path`: the paired devices (net_trust.h, shared
+// with this device's NetAccess).
+bool net_share_link_start(NetShareLink* link, const NetKeypair* identity, const NetDeviceInfo* info,
+                          const char* devices_path);
 void net_share_link_stop(NetShareLink* link);
 // Started (and not stopped)? Only the frontend's thread starts and stops it,
 // so this needs no lock.
 bool net_share_link_started(const NetShareLink* link);
 
 // Our shared folders: where gets land and what puts send.
-void net_share_link_set_folders(NetShareLink* link, const std::vector<std::string>* game_paths,
-                                const char* saves_path, const char* states_path,
-                                const char* screenshots_path);
+void net_share_link_set_folders(NetShareLink* link, const NetShareFolderPaths* paths);
 
-// To a piccolo found on the LAN (or any address): `code` = ours (9 digits,
-// shown here for the other side to type) if it doesn't know us yet; a
-// piccolo that knows us never asks for it. Closes a connection first.
-bool net_share_link_connect(NetShareLink* link, NetAddress address, const char* code);
+// To a device found on the LAN (or any address). `pair`: if it doesn't know
+// us, ask to pair (it pops up a code; status code_needed, then
+// net_share_link_enter_code). Closes a connection first.
+bool net_share_link_connect(NetShareLink* link, NetAddress address, bool pair);
+// The code our user typed (status code_needed). False if none is wanted.
+bool net_share_link_enter_code(NetShareLink* link, const char* code);
 // Across the internet, through the beacon (UDP hole punching, then WebRTC
 // through its signaling; net_client_connect_beacon): `server` is the
 // frontend's beacon setting ("" = none: the calls below fail).
 void net_share_link_set_beacon(NetShareLink* link, const char* server);
 // To a piccolo we paired with (the index into the status' `paired`).
 bool net_share_link_connect_paired(NetShareLink* link, uint32_t device);
-// Pairs across the internet with `code`, ours (net_pair_code_generate, shown
-// on our screen): the other piccolo's user types it in INVITE, which waits in
-// the code's pairing room on the beacon. False if the code isn't 9 digits.
+// Pairs across the internet with `code`, typed by our user (the other device
+// shows it: GENERATE PAIRING CODE, waiting in the code's pairing room on the
+// beacon). False if the code isn't 9 digits.
 bool net_share_link_pair_beacon(NetShareLink* link, const char* code);
 void net_share_link_disconnect(NetShareLink* link);
-// Right after pairing (status newly_paired), on that connection: lets the host
-// come to us at `level` (net_client_grant_back; once). The caller adds the
-// host to its own NetAccess (net_access_add_device) with status.host_key.
-bool net_share_link_grant_back(NetShareLink* link, NetAccessLevel level);
-// A host we may connect to now (a device that paired with us granted it back,
-// NetAccessEventType::granted_back): added to our hosts list and saved.
-bool net_share_link_add_host(NetShareLink* link, const uint8_t* key, const char* name);
+// What the device at `device` (the status' `paired` index) may use here: the
+// DONE screen's ticks right after pairing, or later (net_client_set_grants:
+// saved, and told if we're connected to it).
+bool net_share_link_set_grants(NetShareLink* link, uint32_t device, NetCaps grants);
 // Forgets the host at `device` (the status' `paired` index): net_client_unpair
 // (told if we're connected to it now, else only here). Saved at once.
 bool net_share_link_forget_host(NetShareLink* link, uint32_t device);

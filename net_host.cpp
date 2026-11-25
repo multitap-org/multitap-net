@@ -96,6 +96,9 @@ static int ENET_CALLBACK intercept(ENetHost* enet, void* event)
             NetDiscoveryReply reply;
             reply.nonce = nonce;
             reply.port = enet->address.port;
+            reply.kind = host->discovery_kind;
+            reply.offers = host->discovery_offers;
+            reply.signed_build = host->discovery_signed;
             std::snprintf(reply.name, sizeof(reply.name), "%s", host->name.c_str());
             uint8_t packet[NET_DISCOVERY_MAX_PACKET];
             size_t packet_size = net_discovery_write_reply(packet, sizeof(packet), &reply);
@@ -625,14 +628,18 @@ bool net_host_poll(NetHost* host, NetEvent* event)
     return true;
 }
 
-static bool discover_to(NetHost* host, const ENetAddress* to)
+// `fresh`: a new request (a new nonce; replies to an older one are stale).
+static bool discover_to(NetHost* host, const ENetAddress* to, bool fresh)
 {
     if (host->enet == nullptr)
     {
         return false;
     }
-    host->discovery_nonce = random_u32();
-    host->discovered_count = 0;   // replies to an older request are stale now
+    if (fresh)
+    {
+        host->discovery_nonce = random_u32();
+        host->discovered_count = 0;   // replies to an older request are stale now
+    }
     uint8_t packet[NET_DISCOVERY_REQUEST_SIZE];
     size_t size = net_discovery_write_request(packet, sizeof(packet), host->discovery_nonce);
     if (!send_raw(host->enet, to, packet, size))
@@ -641,6 +648,35 @@ static bool discover_to(NetHost* host, const ENetAddress* to)
         return false;
     }
     return true;
+}
+
+static ENetAddress broadcast_to(uint16_t port)
+{
+    // 255.255.255.255 as ::ffff:255.255.255.255: the dual-stack socket sends
+    // it as an IPv4 broadcast (ENet's own mapping turns 255.255.255.255 into
+    // all-ones IPv6, which isn't one).
+    NetAddress broadcast;
+    for (uint32_t i = 10; i < 16; i++)
+    {
+        broadcast.ip[i] = 0xFF;
+    }
+    broadcast.port = port;
+    return address_to_enet(broadcast);
+}
+
+bool net_host_discover_devices(NetHost* host)
+{
+    ENetAddress first = broadcast_to(NET_DEFAULT_PORT);
+    ENetAddress second = broadcast_to(NET_PICCOLINO_PORT);
+    bool sent = discover_to(host, &first, true);
+    return discover_to(host, &second, false) || sent;
+}
+
+void net_host_set_discovery_info(NetHost* host, uint8_t kind, uint32_t offers, bool signed_build)
+{
+    host->discovery_kind = kind;
+    host->discovery_offers = offers;
+    host->discovery_signed = signed_build;
 }
 
 bool net_host_discover(NetHost* host, uint16_t port)
@@ -657,13 +693,13 @@ bool net_host_discover(NetHost* host, uint16_t port)
     broadcast.ip[15] = 0xFF;
     broadcast.port = port;
     ENetAddress to = address_to_enet(broadcast);
-    return discover_to(host, &to);
+    return discover_to(host, &to, true);
 }
 
 bool net_host_discover_at(NetHost* host, NetAddress address)
 {
     ENetAddress to = address_to_enet(address);
-    return discover_to(host, &to);
+    return discover_to(host, &to, true);
 }
 
 bool net_host_send_datagram(NetHost* host, NetAddress to, const uint8_t* data, size_t size)
