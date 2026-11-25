@@ -44,6 +44,8 @@ jobs:
           git submodule update --init --checkout --depth 1 deps/hosts-common deps/enet deps/monocypher deps/beacon
           git submodule update --init --checkout --depth 1 deps/libdatachannel
           git -C deps/libdatachannel submodule update --init --recursive --depth 1
+          # The beacon server's own Monocypher: the network tests run the server (Linux only).
+          git -C deps/beacon submodule update --init --depth 1
 
       # OpenSSL: libdatachannel's TLS and DTLS on the desktop.
       - name: Packages
