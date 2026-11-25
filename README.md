@@ -7,18 +7,21 @@ pair with and talk to each other. No GUI: no SDL, ImGui or Vulkan.
   (`net_discovery`) share it.
 - **Encrypted links**: Noise XX (`net_noise`) on Monocypher, one channel set
   per peer (`net_link`, `net_session`).
-- **Pairing and access**: a 6-digit code through CPace (`net_cpace`,
-  `net_pairing`), the device's identity and paired devices (`net_trust`),
-  access levels on the host (`net_access`) and the client's side
-  (`net_client`), guest links (`net_guest`, `net_pair_link`).
+- **Pairing and capabilities**: a 9-digit code through CPace (`net_cpace`,
+  `net_pairing`), made and shown by the device asked to pair (it grants the
+  permissions); the device's identity and one record per paired device with
+  both directions (`net_trust`); capabilities as independent bits (GAMEPAD,
+  STREAM, SETTINGS, SHARE: what a device may use is its grant ∩ what the host
+  offers ∩ what it uses), on the host (`net_access`) and the client's side
+  (`net_client`); guest links (`net_guest`, `net_pair_link`).
 - **Across the internet**: the
   [beacon](https://github.com/multitap-org/multitap-beacon) introduces peers
   and helps punch through NATs (`net_beacon`); it never relays. WebRTC data
   channels (`net_rtc_*`, signaling in `net_signal`) carry the same channels:
   libdatachannel natively, the browser's own WebRTC in Emscripten builds
   (`net_webrtc.js`).
-- **SHARE**: listing and copying files between devices with OWNER access
-  (`net_share*`).
+- **SHARE**: listing and copying files between devices granted SHARE
+  (`net_share*`); CONFIG never shows a device's identity or paired devices.
 - Messages: `net_wire` (fields), `net_content` (browsing and loading games),
   `net_speed` (speed test).
 

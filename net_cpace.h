@@ -4,10 +4,10 @@
 // cipher suite CPACE-X25519-SHA512), on Monocypher (X25519, Elligator 2,
 // SHA-512 from its optional/ folder). Pure functions.
 //
-// Why: pairing uses a 6-digit code (decided 2026-11-19: digits are easy on an
+// Why: pairing uses a short digit code (9 digits; decided 2026-11-19: digits are easy on an
 // on-screen keyboard and can be passed over chat). A short code can't be
-// checked with a plain MAC (anyone who sees one MAC tries all 10^6 codes
-// offline in a second); with CPace the code never leaves either side and an
+// checked with a plain MAC (anyone who sees one MAC tries all 10^9 codes
+// offline in seconds); with CPace the code never leaves either side and an
 // attacker gets exactly one online guess per run. net_pairing.h uses it.
 //
 //   A (initiator)                     B (responder)

@@ -53,6 +53,8 @@ struct NetShareLinkStatus
     NetCaps           caps = 0;            // ready: what the host lets us use there
     std::string       host_name;           // ready, or code_needed: the host's name
     NetAppKind     host_kind = NetAppKind::piccolo;
+    NetCaps           host_offers = 0;     // what the host says it serves and uses (ready / code_needed)
+    NetCaps           host_uses = 0;
     bool              host_signed = false;
     bool              code_needed = false; // pairing: show TYPE THE CODE SHOWN ON <host_name> and take the code
     bool              code_retry = false;  // code_needed: the last one was wrong

@@ -1,6 +1,6 @@
 #pragma once
 
-// Games from a client (netcode milestone 5): a paired device with FULL access
+// Games from a client (netcode milestone 5): a paired device granted SETTINGS
 // (net_pairing.h: message types 128..191) browses the host's game folders
 // and asks it to start a game with one of its cores.
 //
@@ -33,7 +33,7 @@
 //   host -> client  load_result    id u32 | status u8
 //   host -> client  game_state     running u8 | core file | core name | core version | game
 //
-// game_state (type 16, sent to every authorized device whatever its level:
+// game_state (type 16, sent to every authorized device whatever it may use:
 // a pad wants to show what it plays) says what runs: at every connection,
 // and whenever a game starts or closes. `game` is the game's name ("Chrono
 // Trigger (USA)"), "" for a core running alone; all texts "" when nothing

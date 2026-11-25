@@ -435,6 +435,8 @@ void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status)
     status->code_retry = status->code_needed && link->code_retry;
     status->host_name = ready || status->code_needed ? link->client.host.name : "";
     status->host_kind = link->client.host.kind;
+    status->host_offers = link->client.host.offers;
+    status->host_uses = link->client.host.uses;
     status->host_signed = link->client.host_signed;
     status->checking_code = link->state == NetShareLinkState::connecting &&
                             (link->client.state == NetClientState::pairing ||
