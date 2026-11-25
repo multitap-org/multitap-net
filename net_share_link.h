@@ -114,7 +114,8 @@ bool net_share_link_started(const NetShareLink* link);
 
 // Our shared folders: where gets land and what puts send.
 void net_share_link_set_folders(NetShareLink* link, const std::vector<std::string>* game_paths,
-                                const char* saves_path, const char* states_path);
+                                const char* saves_path, const char* states_path,
+                                const char* screenshots_path);
 
 // To a piccolo found on the LAN (or any address): `code` = ours (9 digits,
 // shown here for the other side to type) if it doesn't know us yet; a

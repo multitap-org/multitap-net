@@ -1,8 +1,8 @@
 #pragma once
 
 // The host's side of net_share.h: its shared folders (the game folders,
-// SAVES and STATES) as the virtual paths a SHARE device sees, listed,
-// read and written without ever leaving them.
+// SAVES, STATES and SCREENSHOTS) as the virtual paths a SHARE device sees,
+// listed, read and written without ever leaving them.
 //
 // Every path a device sends goes through the same part rules as
 // net_content.h ("", ".", "..", '\\', ':' and control characters refused
@@ -35,15 +35,17 @@ struct NetShareFolders
     std::vector<NetShareEntry> listed;
 };
 
-// The game folders, then SAVES and STATES ("" = not shared). Folders that
-// don't exist now are left out; call again when the settings change. A game
+// The game folders, then SAVES, STATES and SCREENSHOTS ("" = not shared).
+// Folders that don't exist now are left out; call again when the settings
+// change. A game
 // folder whose name is taken ("saves" can't be "SAVES"... but "SAVES" can)
 // gets " 2", " 3".
 void net_share_set_folders(NetShareFolders* folders, const std::vector<std::string>* game_paths,
-                           const char* saves_path, const char* states_path);
+                           const char* saves_path, const char* states_path,
+                           const char* screenshots_path);
 
 // What's in a virtual folder: "" = the shared folders (kinds games / saves /
-// states), otherwise folders first, then files, each sorted ignoring case.
+// states / screenshots), otherwise folders first, then files, each sorted ignoring case.
 // Hidden entries and symlinks leading out of the shared folders are left out.
 NetShareStatus net_share_list(const NetShareFolders* folders, const char* path, std::vector<NetShareEntry>* entries);
 

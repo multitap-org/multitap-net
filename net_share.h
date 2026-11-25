@@ -6,8 +6,9 @@
 //
 // Paths are virtual, like net_content.h's: the first part names one shared
 // folder, the rest goes down from there with '/'. The shared folders are the
-// game folders plus SAVES and STATES; the root listing ("") says which is
-// which by kind, so a client knows where a game's saves and states live.
+// game folders plus SAVES, STATES and SCREENSHOTS; the root listing ("")
+// says which is which by kind, so a client knows where a game's saves and
+// states live.
 // Archives are plain files here (copied whole, never browsed). The host
 // resolves every path without ever leaving the shared folders (the same part
 // rules as net_content.h, then host_fs_is_inside); writes go to a hidden
@@ -88,8 +89,13 @@ enum class NetShareKind : uint8_t
     games,    // root listing: a game folder
     saves,    // root listing: SAVES (<core>/<game>.srm ...)
     states,   // root listing: STATES (<core>/<game>.stateN + .png)
+    screenshots,   // root listing: SCREENSHOTS (no save / state lookup)
 };
-constexpr uint8_t NET_SHARE_KIND_COUNT = 5;
+// Kinds this build knows. A list_result with a kind past these (a newer
+// build's folder kind) reads it as a plain folder, so new kinds can be added
+// without breaking older readers. Builds before SCREENSHOTS refused the whole
+// listing instead; none of those were released.
+constexpr uint8_t NET_SHARE_KIND_COUNT = 6;
 
 struct NetShareEntry
 {
@@ -102,7 +108,8 @@ struct NetShareEntry
 // --- messages ---------------------------------------------------------------
 // Writers return the size, 0 if `capacity` is too small. Readers are false
 // unless the payload is exactly that message (texts without NUL bytes, at
-// most NET_WIRE_TEXT_MAX bytes, kinds and statuses known).
+// most NET_WIRE_TEXT_MAX bytes, statuses known; an unknown kind reads as
+// NetShareKind::folder).
 
 size_t net_share_write_list_request(uint8_t* out, size_t capacity, uint32_t id, uint32_t start, const char* path);
 bool   net_share_read_list_request(const uint8_t* data, size_t size, uint32_t* id, uint32_t* start,

@@ -34,7 +34,11 @@ static bool root_named(const NetShareFolders* folders, const std::string* name)
 static void add_root(NetShareFolders* folders, const char* path, const std::string* base, NetShareKind kind)
 {
     char canonical[NET_WIRE_TEXT_MAX] = {};
-    if (path[0] == '\0' || !host_fs_canonical(path, canonical, sizeof(canonical)) || !host_fs_is_directory(canonical))
+    if (path[0] == '\0')
+    {
+        return;   // not shared
+    }
+    if (!host_fs_canonical(path, canonical, sizeof(canonical)) || !host_fs_is_directory(canonical))
     {
         host_log(LogLevel::info, "Network: shared folder %s isn't there now, not offered", path);
         return;
@@ -51,18 +55,20 @@ static void add_root(NetShareFolders* folders, const char* path, const std::stri
 }
 
 void net_share_set_folders(NetShareFolders* folders, const std::vector<std::string>* game_paths,
-                           const char* saves_path, const char* states_path)
+                           const char* saves_path, const char* states_path,
+                           const char* screenshots_path)
 {
     folders->roots.clear();
     folders->listed_path.clear();
     folders->listed.clear();
-    // SAVES and STATES are named first, so a game folder can't take their
-    // names; they're listed after the game folders.
-    std::vector<NetShareRoot> games;
+    // SAVES, STATES and SCREENSHOTS are named first, so a game folder can't
+    // take their names; they're listed after the game folders.
     std::string saves_name = "SAVES";
     std::string states_name = "STATES";
+    std::string screenshots_name = "SCREENSHOTS";
     add_root(folders, saves_path, &saves_name, NetShareKind::saves);
     add_root(folders, states_path, &states_name, NetShareKind::states);
+    add_root(folders, screenshots_path, &screenshots_name, NetShareKind::screenshots);
     size_t fixed = folders->roots.size();
     for (size_t i = 0; i < game_paths->size(); i++)
     {

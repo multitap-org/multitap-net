@@ -113,12 +113,8 @@ bool net_share_read_list_result(const uint8_t* data, size_t size, uint32_t* id, 
     {
         NetShareEntry entry;
         uint8_t kind = net_wire_get_u8(&reader);
-        if (kind >= NET_SHARE_KIND_COUNT)
-        {
-            reader.ok = false;
-            break;
-        }
-        entry.kind = static_cast<NetShareKind>(kind);
+        // A kind from a newer build is still a folder to go into.
+        entry.kind = kind < NET_SHARE_KIND_COUNT ? static_cast<NetShareKind>(kind) : NetShareKind::folder;
         entry.size = net_wire_get_u64(&reader);
         entry.mtime = net_wire_get_u64(&reader);
         net_wire_get_text(&reader, &entry.name);

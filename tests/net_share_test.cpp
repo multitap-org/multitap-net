@@ -233,8 +233,17 @@ static void test_list_pages()
     one.push_back(games);
     size = net_share_write_list_result(out, sizeof(out), 23, NetShareStatus::ok, &one, 0);
     // Header: type 1, id 4, status 1, start 4, total 4, count 2 = 16; the entry's kind is byte 16.
+    // A newer build's kind (past the ones we know) is still a folder to go into.
     out[16] = NET_SHARE_KIND_COUNT;
-    check(!net_share_read_list_result(out, size, &id, &status, &got_start, &total, &page), "unknown kind refused");
+    check(net_share_read_list_result(out, size, &id, &status, &got_start, &total, &page) && page.size() == 1 &&
+              page[0].kind == NetShareKind::folder && page[0].name == "ROMS",
+          "unknown kind read as a folder");
+    one[0].kind = NetShareKind::screenshots;
+    one[0].name = "SCREENSHOTS";
+    size = net_share_write_list_result(out, sizeof(out), 24, NetShareStatus::ok, &one, 0);
+    check(net_share_read_list_result(out, size, &id, &status, &got_start, &total, &page) && page.size() == 1 &&
+              page[0].kind == NetShareKind::screenshots,
+          "screenshots kind round trip");
 }
 
 int main()

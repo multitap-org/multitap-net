@@ -274,7 +274,7 @@ int main(int argc, char** argv)
     NetShareFolders folders;
     std::vector<std::string> game_paths;
     game_paths.push_back(games);
-    net_share_set_folders(&folders, &game_paths, saves.c_str(), states.c_str());
+    net_share_set_folders(&folders, &game_paths, saves.c_str(), states.c_str(), "");
 
     NetShareEngine sender;
     NetShareEngine receiver;

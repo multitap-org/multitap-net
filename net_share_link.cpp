@@ -302,10 +302,11 @@ bool net_share_link_started(const NetShareLink* link)
 }
 
 void net_share_link_set_folders(NetShareLink* link, const std::vector<std::string>* game_paths,
-                                const char* saves_path, const char* states_path)
+                                const char* saves_path, const char* states_path,
+                                const char* screenshots_path)
 {
     std::lock_guard<std::mutex> guard(link->lock);
-    net_share_set_folders(&link->folders, game_paths, saves_path, states_path);
+    net_share_set_folders(&link->folders, game_paths, saves_path, states_path, screenshots_path);
 }
 
 bool net_share_link_connect(NetShareLink* link, NetAddress address, const char* code)

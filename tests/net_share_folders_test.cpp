@@ -73,11 +73,13 @@ int main(int argc, char** argv)
     std::string roms2 = base + "/other/roms";
     std::string saves = base + "/saves";
     std::string states = base + "/states";
+    std::string screenshots = base + "/screenshots";
     std::string outside = base + "/outside";
     host_fs_make_directories((roms + "/gba").c_str());
     host_fs_make_directories(roms2.c_str());
     host_fs_make_directories((saves + "/mGBA").c_str());
     host_fs_make_directories(states.c_str());
+    host_fs_make_directories(screenshots.c_str());
     host_fs_make_directories(outside.c_str());
     std::string game = roms + "/gba/Metroid Fusion.gba";
     write_text(&game, "FUSION");
@@ -107,18 +109,20 @@ int main(int argc, char** argv)
     std::string named_saves = base + "/SAVES";
     host_fs_make_directories(named_saves.c_str());
     games.push_back(named_saves);
-    net_share_set_folders(&folders, &games, saves.c_str(), states.c_str());
-    check(folders.roots.size() == 5, "missing folders left out");
-    check(folders.roots.size() == 5 && folders.roots[0].name == "roms" && folders.roots[1].name == "roms 2" &&
+    net_share_set_folders(&folders, &games, saves.c_str(), states.c_str(), screenshots.c_str());
+    check(folders.roots.size() == 6, "missing folders left out");
+    check(folders.roots.size() == 6 && folders.roots[0].name == "roms" && folders.roots[1].name == "roms 2" &&
               folders.roots[2].name == "SAVES 2" && folders.roots[3].name == "SAVES" &&
               folders.roots[3].kind == NetShareKind::saves && folders.roots[4].name == "STATES" &&
-              folders.roots[4].kind == NetShareKind::states,
-          "roots: game folders first, SAVES / STATES keep their names");
+              folders.roots[4].kind == NetShareKind::states && folders.roots[5].name == "SCREENSHOTS" &&
+              folders.roots[5].kind == NetShareKind::screenshots,
+          "roots: game folders first, SAVES / STATES / SCREENSHOTS keep their names");
 
     // Listing.
     std::vector<NetShareEntry> entries;
-    check(net_share_list(&folders, "", &entries) == NetShareStatus::ok && entries.size() == 5 &&
-              entries[0].kind == NetShareKind::games && entries[3].kind == NetShareKind::saves,
+    check(net_share_list(&folders, "", &entries) == NetShareStatus::ok && entries.size() == 6 &&
+              entries[0].kind == NetShareKind::games && entries[3].kind == NetShareKind::saves &&
+              entries[5].kind == NetShareKind::screenshots,
           "root listing with kinds");
     check(net_share_list(&folders, "roms/gba", &entries) == NetShareStatus::ok, "folder listed");
     check(has_entry(&entries, "Metroid Fusion.gba") && !has_entry(&entries, ".hidden") &&
