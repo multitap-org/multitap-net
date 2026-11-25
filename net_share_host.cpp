@@ -20,9 +20,10 @@ void net_share_host_stop(NetShareHost* share)
 }
 
 void net_share_host_set_folders(NetShareHost* share, const std::vector<std::string>* game_paths,
-                                const char* saves_path, const char* states_path)
+                                const char* saves_path, const char* states_path,
+                                const char* screenshots_path)
 {
-    net_share_set_folders(&share->folders, game_paths, saves_path, states_path);
+    net_share_set_folders(&share->folders, game_paths, saves_path, states_path, screenshots_path);
 }
 
 static void send_control(NetShareHost* share, NetAccess* access, uint32_t peer, size_t size)

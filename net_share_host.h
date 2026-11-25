@@ -37,7 +37,8 @@ void net_share_host_stop(NetShareHost* share);
 
 // The shared folders (the frontend's settings). A copy running isn't stopped.
 void net_share_host_set_folders(NetShareHost* share, const std::vector<std::string>* game_paths,
-                                const char* saves_path, const char* states_path);
+                                const char* saves_path, const char* states_path,
+                                const char* screenshots_path);
 
 // A message from an authorized peer: true if it was piccolo-share's (handled
 // here, not for the frontend). NetAccess already dropped what a device below
