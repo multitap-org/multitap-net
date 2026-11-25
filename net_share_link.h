@@ -30,7 +30,7 @@ struct NetShareLinkFound
 {
     std::string   name;
     NetAddress    address;
-    NetDeviceKind kind = NetDeviceKind::piccolo;
+    NetAppKind kind = NetAppKind::piccolo;
     NetCaps       offers = 0;      // what it serves (discovery v2; 0 from an old device)
     bool          offers_known = false;
     bool          signed_build = false;   // what it says (checked once connected)
@@ -52,7 +52,7 @@ struct NetShareLinkStatus
     NetClientRefusal  refusal = NetClientRefusal::none;   // why the last try ended
     NetCaps           caps = 0;            // ready: what the host lets us use there
     std::string       host_name;           // ready, or code_needed: the host's name
-    NetDeviceKind     host_kind = NetDeviceKind::piccolo;
+    NetAppKind     host_kind = NetAppKind::piccolo;
     bool              host_signed = false;
     bool              code_needed = false; // pairing: show TYPE THE CODE SHOWN ON <host_name> and take the code
     bool              code_retry = false;  // code_needed: the last one was wrong

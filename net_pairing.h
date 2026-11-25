@@ -104,7 +104,7 @@ constexpr size_t NET_BUILD_SIGNATURE_MAX = 256;
 struct NetDeviceInfo
 {
     char          name[NET_DEVICE_NAME_MAX + 1] = {};
-    NetDeviceKind kind = NetDeviceKind::piccolo;
+    NetAppKind kind = NetAppKind::piccolo;
     NetCaps       offers = 0;   // what it can serve
     NetCaps       uses = 0;     // what it can make use of
     uint16_t      record_size = 0;

@@ -62,7 +62,7 @@ static void test_pair_codes()
     check(slots_vary, "the slot digits are random too");
 }
 
-static NetDeviceInfo make_info(const char* name, NetDeviceKind kind, NetCaps offers, NetCaps uses)
+static NetDeviceInfo make_info(const char* name, NetAppKind kind, NetCaps offers, NetCaps uses)
 {
     NetDeviceInfo info;
     net_device_info_set_name(&info, name);
@@ -107,12 +107,12 @@ static void test_caps()
     check(net_caps_from_level("full", &old) && old == NET_CAPS_ALL, "old full: everything");
     check(net_caps_from_level("owner", &old) && old == NET_CAPS_ALL, "old owner: everything");
     check(!net_caps_from_level("boss", &old), "an unknown level isn't one");
-    NetDeviceKind kind = NetDeviceKind::piccolo;
-    check(net_device_kind_parse("piccolino", &kind) && kind == NetDeviceKind::piccolino &&
-              std::strcmp(net_device_kind_name(NetDeviceKind::piccoletto), "piccoletto") == 0,
+    NetAppKind kind = NetAppKind::piccolo;
+    check(net_app_kind_parse("piccolino", &kind) && kind == NetAppKind::piccolino &&
+              std::strcmp(net_app_kind_name(NetAppKind::piccoletto), "piccoletto") == 0,
           "kinds by name");
 
-    NetDeviceInfo host = make_info("HOST", NetDeviceKind::piccolino, NET_CAP_SHARE | NET_CAP_SETTINGS, 0);
+    NetDeviceInfo host = make_info("HOST", NetAppKind::piccolino, NET_CAP_SHARE | NET_CAP_SETTINGS, 0);
     const char* record = "app=piccolino\nversion=0.4.0\n";
     std::memcpy(host.record, record, std::strlen(record));
     host.record_size = static_cast<uint16_t>(std::strlen(record));
@@ -123,7 +123,7 @@ static void test_caps()
     NetCaps told = 0;
     NetDeviceInfo read;
     check(size > 0 && net_message_read_welcome(message, size, &told, &read) && told == NET_CAP_SHARE &&
-              std::strcmp(read.name, "HOST") == 0 && read.kind == NetDeviceKind::piccolino &&
+              std::strcmp(read.name, "HOST") == 0 && read.kind == NetAppKind::piccolino &&
               read.offers == (NET_CAP_SHARE | NET_CAP_SETTINGS) && read.record_size == host.record_size &&
               std::memcmp(read.record, record, host.record_size) == 0 && read.signature_size == 3,
           "welcome carries the caps and the host's info (build proof included)");
@@ -162,7 +162,7 @@ static void test_discovery_packets()
     NetDiscoveryReply reply;
     reply.nonce = 42;
     reply.port = 55420;
-    reply.kind = static_cast<uint8_t>(NetDeviceKind::piccolino);
+    reply.kind = static_cast<uint8_t>(NetAppKind::piccolino);
     reply.offers = NET_CAP_SHARE | NET_CAP_SETTINGS;
     reply.signed_build = true;
     std::snprintf(reply.name, sizeof(reply.name), "Living room PC");
@@ -171,7 +171,7 @@ static void test_discovery_packets()
     check(size == NET_DISCOVERY_REPLY_HEADER_SIZE + std::strlen("Living room PC"), "reply size");
     check(net_discovery_read_reply(packet, size, &read), "reply round trip");
     check(read.nonce == 42 && read.port == 55420 && std::strcmp(read.name, "Living room PC") == 0, "reply fields");
-    check(read.version == 2 && read.kind == static_cast<uint8_t>(NetDeviceKind::piccolino) &&
+    check(read.version == 2 && read.kind == static_cast<uint8_t>(NetAppKind::piccolino) &&
               read.offers == (NET_CAP_SHARE | NET_CAP_SETTINGS) && read.signed_build,
           "v2 reply: kind, offers, signed");
     // A version 1 reply (an older device): port and name only, still read.
@@ -912,9 +912,9 @@ static void test_pairing(const char* folder)
 
     // A piccolo (offers everything, uses FILE TRANSFER and SETTINGS) and a
     // piccoletto (offers nothing, uses GAMEPAD, STREAM and SETTINGS).
-    NetDeviceInfo host_info = make_info("Living room", NetDeviceKind::piccolo, NET_CAPS_ALL,
+    NetDeviceInfo host_info = make_info("Living room", NetAppKind::piccolo, NET_CAPS_ALL,
                                         NET_CAP_SHARE | NET_CAP_SETTINGS);
-    NetDeviceInfo client_info = make_info("Ana's phone", NetDeviceKind::piccoletto, 0,
+    NetDeviceInfo client_info = make_info("Ana's phone", NetAppKind::piccoletto, 0,
                                           NET_CAP_GAMEPAD | NET_CAP_STREAM | NET_CAP_SETTINGS);
     PairLoop* loop = new PairLoop();
     check(net_access_create(&loop->host, 0, &host_info, &host_key, host_trust.c_str()), "access host created");
@@ -934,7 +934,7 @@ static void test_pairing(const char* folder)
     check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::refused,
           "the host refuses: refused (refused)");
     check(loop->host_requests == 1 && std::strcmp(loop->host_request.info.name, "Ana's phone") == 0 &&
-              loop->host_request.info.kind == NetDeviceKind::piccoletto && net_pair_code_valid(loop->host_request.code),
+              loop->host_request.info.kind == NetAppKind::piccoletto && net_pair_code_valid(loop->host_request.code),
           "the host saw the request: the device's name and kind, and a code of its own to show");
     result = pair_attempt(loop, address, true);
     check(result.type == NetClientEventType::refused && result.refusal == NetClientRefusal::pairing_closed &&
@@ -974,14 +974,14 @@ static void test_pairing(const char* folder)
           "two wrong codes: two new codes on the host, the client asked twice more");
     check(result.caps == (NET_CAP_GAMEPAD | NET_CAP_SETTINGS) && loop->client.caps == result.caps,
           "the client may use what the host's user ticked, kept to what it uses");
-    check(std::strcmp(result.host.name, "Living room") == 0 && result.host.kind == NetDeviceKind::piccolo &&
+    check(std::strcmp(result.host.name, "Living room") == 0 && result.host.kind == NetAppKind::piccolo &&
               result.host.offers == NET_CAPS_ALL,
           "the client knows the host's name, kind and offers");
     pump_for(loop, 100);
     check(loop->host_paired, "host reported the new device");
     NetTrustedDevice* record = host_record(loop, 0);
     check(loop->host.trust.devices.size() == 1 && record != nullptr && record->name == "Ana's phone" &&
-              record->kind == NetDeviceKind::piccoletto && record->grants == (NET_CAP_GAMEPAD | NET_CAP_SETTINGS),
+              record->kind == NetAppKind::piccoletto && record->grants == (NET_CAP_GAMEPAD | NET_CAP_SETTINGS),
           "host keeps the device: name, kind, grants");
     check(record != nullptr && std::memcmp(record->key, client_key.public_key, NET_KEY_SIZE) == 0,
           "host trusts the client's key");

@@ -55,21 +55,21 @@ bool net_caps_from_level(const char* level, NetCaps* caps);
 
 // What kind of program a device is: shown on screens and used to word them;
 // never trusted for anything.
-enum class NetDeviceKind : uint8_t
+enum class NetAppKind : uint8_t
 {
     piccolo = 0,
     piccoletto = 1,
     piccolino = 2,
 };
-constexpr uint32_t NET_DEVICE_KIND_COUNT = 3;
-const char* net_device_kind_name(NetDeviceKind kind);   // "piccolo", "piccoletto", "piccolino"
-bool net_device_kind_parse(const char* name, NetDeviceKind* kind);
+constexpr uint32_t NET_APP_KIND_COUNT = 3;
+const char* net_app_kind_name(NetAppKind kind);   // "piccolo", "piccoletto", "piccolino"
+bool net_app_kind_parse(const char* name, NetAppKind* kind);
 
 struct NetTrustedDevice
 {
     uint8_t       key[NET_KEY_SIZE] = {};
     std::string   name;
-    NetDeviceKind kind = NetDeviceKind::piccolo;
+    NetAppKind kind = NetAppKind::piccolo;
     NetCaps       grants = 0;          // what it may use here
     NetCaps       granted = 0;         // what it said we may use there (last known)
     bool          signed_build = false;   // last known

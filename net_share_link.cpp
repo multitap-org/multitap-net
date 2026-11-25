@@ -42,8 +42,8 @@ static void on_discovered(NetShareLink* link, const NetEvent* event, double now)
         slot->address = address;
     }
     slot->name = event->discovered.name;
-    slot->kind = event->discovered.kind < NET_DEVICE_KIND_COUNT ? static_cast<NetDeviceKind>(event->discovered.kind)
-                                                                 : NetDeviceKind::piccolo;
+    slot->kind = event->discovered.kind < NET_APP_KIND_COUNT ? static_cast<NetAppKind>(event->discovered.kind)
+                                                                 : NetAppKind::piccolo;
     slot->offers = event->discovered.offers & NET_CAPS_ALL;
     slot->offers_known = event->discovered.version >= 2;
     slot->signed_build = event->discovered.signed_build;

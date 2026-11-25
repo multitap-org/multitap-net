@@ -187,11 +187,11 @@ static bool read_info(const uint8_t* data, size_t size, NetDeviceInfo* info)
     std::memcpy(info->name, data + 1, name);
     info->name[name] = '\0';
     size_t at = 1 + name;
-    if (data[at] >= NET_DEVICE_KIND_COUNT)
+    if (data[at] >= NET_APP_KIND_COUNT)
     {
         return false;
     }
-    info->kind = static_cast<NetDeviceKind>(data[at]);
+    info->kind = static_cast<NetAppKind>(data[at]);
     at += 1;
     info->offers = get_u32(data + at);
     at += 4;

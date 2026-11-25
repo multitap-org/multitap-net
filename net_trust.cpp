@@ -34,7 +34,7 @@ uint32_t net_trust_generation()
 }
 
 static constexpr const char* CAP_NAMES[NET_CAP_COUNT] = {"gamepad", "stream", "settings", "share"};
-static constexpr const char* KIND_NAMES[NET_DEVICE_KIND_COUNT] = {"piccolo", "piccoletto", "piccolino"};
+static constexpr const char* KIND_NAMES[NET_APP_KIND_COUNT] = {"piccolo", "piccoletto", "piccolino"};
 
 std::string net_caps_name(NetCaps caps)
 {
@@ -124,19 +124,19 @@ bool net_caps_from_level(const char* level, NetCaps* caps)
     return false;
 }
 
-const char* net_device_kind_name(NetDeviceKind kind)
+const char* net_app_kind_name(NetAppKind kind)
 {
     uint32_t index = static_cast<uint32_t>(kind);
-    return index < NET_DEVICE_KIND_COUNT ? KIND_NAMES[index] : KIND_NAMES[0];
+    return index < NET_APP_KIND_COUNT ? KIND_NAMES[index] : KIND_NAMES[0];
 }
 
-bool net_device_kind_parse(const char* name, NetDeviceKind* kind)
+bool net_app_kind_parse(const char* name, NetAppKind* kind)
 {
-    for (uint32_t i = 0; i < NET_DEVICE_KIND_COUNT; i++)
+    for (uint32_t i = 0; i < NET_APP_KIND_COUNT; i++)
     {
         if (std::strcmp(name, KIND_NAMES[i]) == 0)
         {
-            *kind = static_cast<NetDeviceKind>(i);
+            *kind = static_cast<NetAppKind>(i);
             return true;
         }
     }
@@ -270,9 +270,9 @@ static bool load_devices(const char* path, std::vector<NetTrustedDevice>* device
         const char* own = settings_file_get(&file, section, "own");         // before access existed
         const char* paired = settings_file_get(&file, section, "paired");
         device.name = name != nullptr ? name : "";
-        if (kind != nullptr && !net_device_kind_parse(kind, &device.kind))
+        if (kind != nullptr && !net_app_kind_parse(kind, &device.kind))
         {
-            device.kind = NetDeviceKind::piccolo;
+            device.kind = NetAppKind::piccolo;
         }
         if (grants != nullptr)
         {
@@ -326,7 +326,7 @@ bool net_trust_save(const NetTrust* trust, const char* path)
         net_bytes_to_hex(device->key, NET_KEY_SIZE, hex, sizeof(hex));
         std::string section = std::string(DEVICE_PREFIX) + hex;
         settings_file_set(&file, section.c_str(), "name", device->name.c_str());
-        settings_file_set(&file, section.c_str(), "kind", net_device_kind_name(device->kind));
+        settings_file_set(&file, section.c_str(), "kind", net_app_kind_name(device->kind));
         settings_file_set(&file, section.c_str(), "grants", net_caps_name(device->grants).c_str());
         settings_file_set(&file, section.c_str(), "granted", net_caps_name(device->granted).c_str());
         settings_file_set(&file, section.c_str(), "signed", device->signed_build ? "true" : "false");

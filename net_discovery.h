@@ -18,7 +18,7 @@
 // The nonce lets a client match replies to its own request and ignore stale
 // ones. `port` is where the host's ENet listens (today the same port).
 // `kind` and `offers` say what the device is and what it serves (net_trust.h:
-// NetDeviceKind, NetCaps), so a device lists only those it can use (Andrés,
+// NetAppKind, NetCaps), so a device lists only those it can use (Andrés,
 // 2026-11-25: offers go in discovery, never through the beacon). flags bit 0:
 // it says it's a signed build (only a hint for the list: the build proof is
 // checked once connected). A version 1 reply (port and name only) still reads,
@@ -47,7 +47,7 @@ struct NetDiscoveryReply
     uint8_t  version = NET_DISCOVERY_VERSION;   // 1: an old device (no kind, no offers)
     uint32_t nonce = 0;
     uint16_t port = 0;
-    uint8_t  kind = 0;          // NetDeviceKind
+    uint8_t  kind = 0;          // NetAppKind
     uint32_t offers = 0;        // NetCaps
     bool     signed_build = false;
     char     name[NET_DISCOVERY_MAX_NAME + 1] = {};   // NUL-terminated

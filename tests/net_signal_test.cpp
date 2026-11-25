@@ -47,7 +47,7 @@ static NetDeviceInfo test_device(const char* name, bool phone)
 {
     NetDeviceInfo info;
     net_device_info_set_name(&info, name);
-    info.kind = phone ? NetDeviceKind::piccoletto : NetDeviceKind::piccolo;
+    info.kind = phone ? NetAppKind::piccoletto : NetAppKind::piccolo;
     info.offers = phone ? 0 : NET_CAPS_ALL;
     info.uses = NET_CAPS_ALL;
     return info;
