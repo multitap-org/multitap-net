@@ -1,10 +1,17 @@
 #include "net_discovery.h"
 
 #include <cstring>
+#include <string>
+
+#include "net_trust.h"
 
 static constexpr uint8_t MAGIC[4] = {'M', 'T', 'A', 'P'};
 static constexpr uint8_t TYPE_REQUEST = 1;
 static constexpr uint8_t TYPE_REPLY = 2;
+static constexpr uint8_t FLAG_SIGNED = 1;
+static constexpr uint8_t FLAG_KEY_ID = 2;   // version 3
+
+static_assert(NET_DISCOVERY_KEY_ID_SIZE == NET_KEY_ID_SIZE, "discovery carries what net_trust_has_key_id compares");
 
 static void write_u16(uint8_t* out, uint16_t value)
 {
@@ -33,11 +40,11 @@ static uint32_t read_u32(const uint8_t* data)
 
 // Magic, type, version, two reserved zero bytes, nonce: the first 12 bytes of
 // both packets.
-static void write_header(uint8_t* out, uint8_t type, uint32_t nonce)
+static void write_header(uint8_t* out, uint8_t type, uint8_t version, uint32_t nonce)
 {
     std::memcpy(out, MAGIC, sizeof(MAGIC));
     out[4] = type;
-    out[5] = NET_DISCOVERY_VERSION;
+    out[5] = version;
     out[6] = 0;
     out[7] = 0;
     write_u32(out + 8, nonce);
@@ -65,7 +72,7 @@ size_t net_discovery_write_request(uint8_t* out, size_t capacity, uint32_t nonce
     {
         return 0;
     }
-    write_header(out, TYPE_REQUEST, nonce);
+    write_header(out, TYPE_REQUEST, NET_DISCOVERY_REQUEST_VERSION, nonce);
     return NET_DISCOVERY_REQUEST_SIZE;
 }
 
@@ -76,25 +83,36 @@ bool net_discovery_read_request(const uint8_t* data, size_t size, uint32_t* nonc
         return false;
     }
     uint8_t version = 0;
-    return read_header(data, size, TYPE_REQUEST, nonce, &version) && version == NET_DISCOVERY_VERSION;
+    return read_header(data, size, TYPE_REQUEST, nonce, &version) && version == NET_DISCOVERY_REQUEST_VERSION;
 }
 
 size_t net_discovery_write_reply(uint8_t* out, size_t capacity, const NetDiscoveryReply* reply)
 {
+    bool v3 = reply->version >= 3;
+    size_t header = v3 ? NET_DISCOVERY_V3_REPLY_HEADER_SIZE : NET_DISCOVERY_REPLY_HEADER_SIZE;
     // At most NET_DISCOVERY_MAX_NAME: that's all `name` holds.
     size_t name_length = std::strlen(reply->name);
-    size_t size = NET_DISCOVERY_REPLY_HEADER_SIZE + name_length;
+    size_t size = header + name_length;
     if (capacity < size)
     {
         return 0;
     }
-    write_header(out, TYPE_REPLY, reply->nonce);
+    write_header(out, TYPE_REPLY, v3 ? static_cast<uint8_t>(3) : static_cast<uint8_t>(2), reply->nonce);
     write_u16(out + 12, reply->port);
     out[14] = reply->kind;
     write_u32(out + 15, reply->offers);
-    out[19] = reply->signed_build ? 1 : 0;
-    out[20] = static_cast<uint8_t>(name_length);
-    std::memcpy(out + NET_DISCOVERY_REPLY_HEADER_SIZE, reply->name, name_length);
+    uint8_t flags = reply->signed_build ? FLAG_SIGNED : static_cast<uint8_t>(0);
+    if (v3)
+    {
+        if (reply->key_id_known)
+        {
+            flags = static_cast<uint8_t>(flags | FLAG_KEY_ID);
+        }
+        std::memcpy(out + 20, reply->key_id, NET_DISCOVERY_KEY_ID_SIZE);
+    }
+    out[19] = flags;
+    out[header - 1] = static_cast<uint8_t>(name_length);
+    std::memcpy(out + header, reply->name, name_length);
     return size;
 }
 
@@ -111,8 +129,9 @@ static bool read_reply_name(const uint8_t* data, size_t size, size_t header, Net
     {
         return false;
     }
-    std::memcpy(reply->name, data + header, name_length);
-    reply->name[name_length] = '\0';
+    // Shown by frontends before pairing: whatever the other side put in it.
+    std::string cleaned = net_name_clean(std::string(reinterpret_cast<const char*>(data + header), name_length).c_str());
+    std::memcpy(reply->name, cleaned.c_str(), cleaned.size() + 1);
     return true;
 }
 
@@ -145,7 +164,26 @@ bool net_discovery_read_reply(const uint8_t* data, size_t size, NetDiscoveryRepl
         *reply = read;
         return true;
     }
-    if (version != NET_DISCOVERY_VERSION || size < NET_DISCOVERY_REPLY_HEADER_SIZE || data[19] > 1)
+    if (version == 3)
+    {
+        if (size < NET_DISCOVERY_V3_REPLY_HEADER_SIZE || (data[19] & ~(FLAG_SIGNED | FLAG_KEY_ID)) != 0)
+        {
+            return false;
+        }
+        read.port = read_u16(data + 12);
+        read.kind = data[14];
+        read.offers = read_u32(data + 15);
+        read.signed_build = (data[19] & FLAG_SIGNED) != 0;
+        read.key_id_known = (data[19] & FLAG_KEY_ID) != 0;
+        std::memcpy(read.key_id, data + 20, NET_DISCOVERY_KEY_ID_SIZE);
+        if (!read_reply_name(data, size, NET_DISCOVERY_V3_REPLY_HEADER_SIZE, &read))
+        {
+            return false;
+        }
+        *reply = read;
+        return true;
+    }
+    if (version != 2 || size < NET_DISCOVERY_REPLY_HEADER_SIZE || data[19] > 1)
     {
         return false;
     }

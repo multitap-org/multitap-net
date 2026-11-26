@@ -30,6 +30,7 @@
 #include "net_noise.h"
 
 constexpr size_t NET_DEVICE_NAME_MAX = 63;   // bytes of UTF-8
+constexpr size_t NET_KEY_ID_SIZE = 8;        // the first bytes of a public key: what discovery shows of it
 
 // What a device may use on another (Andrés, 2026-11-25: independent bits, Q10).
 // Each bit is one capability; none implies another. A device offers some
@@ -103,6 +104,14 @@ uint32_t net_trust_generation();
 
 // Index of the device with this key, or -1.
 int32_t net_trust_find(const NetTrust* trust, const uint8_t* key);
+// True when a trusted device's key starts with `key_id` (NET_KEY_ID_SIZE
+// bytes: what discovery version 3 carries). Not proof of identity (8 bytes,
+// unauthenticated on the LAN), only what to show as "paired"; the connection's
+// key check decides for real.
+bool net_trust_has_key_id(const NetTrust* trust, const uint8_t* key_id);
+// A name from the wire made safe to show: cut to NET_DEVICE_NAME_MAX at a
+// UTF-8 boundary, control characters and line breaks replaced by '_'.
+std::string net_name_clean(const char* name);
 // Adds a device (or renames an existing one, keeping its grants), dated
 // today. Returns its index.
 uint32_t net_trust_add(NetTrust* trust, const uint8_t* key, const char* name);

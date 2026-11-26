@@ -56,18 +56,20 @@ bool net_access_create(NetAccess* access, uint16_t port, const NetDeviceInfo* in
 {
     access->trust_path = trust_path;
     access->info = *info;
-    access->name = info->name;
+    net_device_info_set_name(&access->info, info->name);   // as read_info will show it to the other side
+    access->name = access->info.name;
     std::memcpy(access->host_key, identity->public_key, NET_KEY_SIZE);
     access->out.resize(NET_PAIR_MAX_MESSAGE);
     net_trust_file_lock();
     load_trust(access);
     net_trust_file_unlock();
-    if (!net_session_create_listener(&access->session, port, info->name, identity))
+    if (!net_session_create_listener(&access->session, port, access->info.name, identity))
     {
         return false;
     }
     net_host_set_discovery_info(&access->session.host, static_cast<uint8_t>(info->kind), info->offers,
                                 info->record_size > 0);
+    net_host_set_discovery_key(&access->session.host, identity->public_key);   // lets lists tell paired from unpaired by key
     beacon_refresh_ids(access);
     return true;
 }
@@ -350,6 +352,7 @@ static void on_paired_hello(NetAccess* access, uint32_t index, const uint8_t* da
     send_welcome(access, index);
     event->type = NetAccessEventType::authorized;
     event->device = peer->device;
+    std::memcpy(event->key, peer->key, NET_KEY_SIZE);
     event->caps = effective_caps(access, peer);
     event->info = peer->info;
     event->signed_build = peer->signed_build;
@@ -527,6 +530,7 @@ static void on_pair_confirm(NetAccess* access, uint32_t index, const uint8_t* da
     host_log(LogLevel::info, "Network: paired with \"%s\" (%s)", peer->info.name, fingerprint);
     event->type = NetAccessEventType::paired;
     event->device = peer->device;
+    std::memcpy(event->key, peer->key, NET_KEY_SIZE);
     event->caps = effective_caps(access, peer);
     event->info = peer->info;
     event->signed_build = peer->signed_build;
@@ -725,6 +729,7 @@ static bool on_authorized_control(NetAccess* access, uint32_t index, const NetSe
         event->type = NetAccessEventType::granted;
         event->peer = index;
         event->device = peer->device;
+        std::memcpy(event->key, peer->key, NET_KEY_SIZE);
         event->caps = granted;
         event->address = session_event->address;
         return true;
@@ -753,6 +758,16 @@ static bool on_message(NetAccess* access, const NetSessionEvent* session_event, 
     bool filled = false;
     if (peer->state == NetAccessPeerState::authorized)
     {
+        if (session_event->channel == NetChannel::input)
+        {
+            // Pad packets need the GAMEPAD grant, like the control messages
+            // need theirs: a device granted only SHARE can't press buttons.
+            if ((effective_caps(access, peer) & NET_CAP_GAMEPAD) == 0)
+            {
+                access->dropped_by_access++;
+                return false;
+            }
+        }
         if (session_event->channel == NetChannel::control)
         {
             uint8_t type = net_message_type(session_event->data, session_event->size);
@@ -770,6 +785,7 @@ static bool on_message(NetAccess* access, const NetSessionEvent* session_event, 
         event->caps = effective_caps(access, peer);
         event->peer = index;
         event->device = peer->device;
+        std::memcpy(event->key, peer->key, NET_KEY_SIZE);
         event->address = session_event->address;
         event->channel = session_event->channel;
         event->data = session_event->data;
@@ -940,6 +956,8 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
             NetAccessPeer* peer = &access->peers[session_event.peer];
             NetAccessPeerState state = peer->state;
             int32_t device = peer->device;
+            uint8_t closed_key[NET_KEY_SIZE];
+            std::memcpy(closed_key, peer->key, NET_KEY_SIZE);   // peer_reset wipes it
             bool forgotten = peer->forgotten;
             bool shown = peer->shown_code;
             peer_reset(peer);
@@ -967,6 +985,7 @@ bool net_access_poll(NetAccess* access, NetAccessEvent* event)
                 event->type = NetAccessEventType::closed;
                 event->peer = session_event.peer;
                 event->device = device;
+                std::memcpy(event->key, closed_key, NET_KEY_SIZE);
                 event->address = session_event.address;
                 filled = true;
             }

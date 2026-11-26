@@ -34,6 +34,9 @@ struct NetShareLinkFound
     NetCaps       offers = 0;      // what it serves (discovery v2; 0 from an old device)
     bool          offers_known = false;
     bool          signed_build = false;   // what it says (checked once connected)
+    uint8_t       key_id[NET_DISCOVERY_KEY_ID_SIZE] = {};   // the first bytes of its public key (discovery v3)
+    bool          key_id_known = false;   // false from an older device: never shown as paired by name
+    bool          paired = false;   // key_id_known and a paired device's key starts with it (filled by the link)
     double        seen_at = 0.0;
 };
 

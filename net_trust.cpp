@@ -375,6 +375,18 @@ bool net_trust_merge_old_hosts(NetTrust* trust, const char* path, const char* ol
     return true;
 }
 
+bool net_trust_has_key_id(const NetTrust* trust, const uint8_t* key_id)
+{
+    for (size_t i = 0; i < trust->devices.size(); i++)
+    {
+        if (std::memcmp(trust->devices[i].key, key_id, NET_KEY_ID_SIZE) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 int32_t net_trust_find(const NetTrust* trust, const uint8_t* key)
 {
     for (size_t i = 0; i < trust->devices.size(); i++)
@@ -400,10 +412,10 @@ static std::string today()
     return text;
 }
 
-// Names are shown on screens and written as one line of a settings file:
-// cut to NET_DEVICE_NAME_MAX at a UTF-8 boundary, control characters (line
-// breaks included) replaced, brackets too (they'd look like section headers).
-static std::string clean_name(const char* name)
+// A name that came off the wire (or goes into a file): cut to
+// NET_DEVICE_NAME_MAX at a UTF-8 boundary, control characters (line breaks
+// included) replaced by '_'. Other bytes, UTF-8 included, stay as they are.
+std::string net_name_clean(const char* name)
 {
     std::string out;
     size_t length = std::strlen(name);
@@ -418,7 +430,22 @@ static std::string clean_name(const char* name)
     for (size_t i = 0; i < length; i++)
     {
         uint8_t c = static_cast<uint8_t>(name[i]);
-        out.push_back(c < 0x20 || c == 0x7F || c == '[' || c == ']' ? '_' : name[i]);
+        out.push_back(c < 0x20 || c == 0x7F ? '_' : name[i]);
+    }
+    return out;
+}
+
+// Names are shown on screens and written as one line of a settings file: the
+// cleaned name, brackets replaced too (they'd look like section headers).
+static std::string clean_name(const char* name)
+{
+    std::string out = net_name_clean(name);
+    for (size_t i = 0; i < out.size(); i++)
+    {
+        if (out[i] == '[' || out[i] == ']')
+        {
+            out[i] = '_';
+        }
     }
     return out;
 }
