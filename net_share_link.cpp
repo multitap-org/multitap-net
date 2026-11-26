@@ -166,8 +166,8 @@ static void poll_client(NetShareLink* link)
             }
             else
             {
-                // Our code: the other piccolo's user types it in INVITE, which
-                // waits in the code's pairing room (net_access_invite).
+                // The code our user typed, shown by the other device in
+                // GENERATE PAIRING CODE, which waits in the code's pairing room.
                 started = net_client_pair_beacon(&link->client, link->servers, link->server_count,
                                                  link->connect_code.c_str());
             }

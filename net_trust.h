@@ -37,7 +37,7 @@ constexpr size_t NET_KEY_ID_SIZE = 8;        // the first bytes of a public key:
 // (what it can serve) and uses some (what it can make use of); what a peer
 // gets is the stored grant ∩ what this device offers ∩ what the peer uses.
 using NetCaps = uint32_t;
-constexpr NetCaps NET_CAP_GAMEPAD = 1u << 0;    // play with its pads (and the game's hotkeys)
+constexpr NetCaps NET_CAP_GAMEPAD = 1u << 0;    // play with its pads (the game's hotkeys too, but only with STREAM as well: piccolo)
 constexpr NetCaps NET_CAP_STREAM = 1u << 1;     // receive the game's video and audio (remote play)
 constexpr NetCaps NET_CAP_SETTINGS = 1u << 2;   // configure the frontend, browse and load games (was FULL)
 constexpr NetCaps NET_CAP_SHARE = 1u << 3;      // read and write files in the shared folders (file transfer)

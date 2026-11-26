@@ -3,8 +3,8 @@
 // A link that names a host: its public key, and the beacon when it isn't the
 // default one (and its QR code, drawn by the frontend).
 //
-// Not used for pairing since 2026-11-22 (the client shows the code and the
-// host types it: net_pairing.h). Kept, with piccolo's QR drawing and
+// Not used for pairing since 2026-11-22 (the device that is asked shows the
+// code and the other one types it: net_pairing.h). Kept, with piccolo's QR drawing and
 // piccoletto's link intent, for the links to come (Andrés, 2026-11-22: a QR or
 // a click to join a game from the lobby).
 //
