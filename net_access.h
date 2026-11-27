@@ -105,7 +105,10 @@ struct NetAccessEvent
 {
     NetAccessEventType type = NetAccessEventType::none;
     uint32_t       peer = NET_NO_PEER;
-    int32_t        device = -1;
+    int32_t        device = -1;   // index in trust.devices, valid only at the moment the event was made: the list may change
+                                  // before a frontend (another thread) reads it. Use `key` and look the device up again.
+    uint8_t        key[NET_KEY_SIZE] = {};   // the device's key (authorized / paired / message / granted / closed of a paired
+                                             // device); zero when the event has no device (net_trust_find)
     NetAddress     address;
     NetChannel     channel = NetChannel::control;
     const uint8_t* data = nullptr;   // message: valid until the next poll

@@ -116,8 +116,12 @@ static size_t write_name(uint8_t* out, const char* name)
 
 void net_device_info_set_name(NetDeviceInfo* info, const char* name)
 {
-    size_t length = name_length(name);
-    std::memcpy(info->name, name, length);
+    // Cleaned like a name read off the wire (read_info): the pairing code's
+    // associated data is each side's view of the names, so what we send must
+    // be what the other side will read.
+    std::string cleaned = net_name_clean(name);
+    size_t length = name_length(cleaned.c_str());
+    std::memcpy(info->name, cleaned.c_str(), length);
     info->name[length] = '\0';
 }
 
@@ -186,6 +190,8 @@ static bool read_info(const uint8_t* data, size_t size, NetDeviceInfo* info)
     }
     std::memcpy(info->name, data + 1, name);
     info->name[name] = '\0';
+    // Shown before pairing, so whatever the other side put in it is cleaned here.
+    net_device_info_set_name(info, net_name_clean(info->name).c_str());
     size_t at = 1 + name;
     if (data[at] >= NET_APP_KIND_COUNT)
     {
@@ -234,6 +240,10 @@ NetCaps net_message_required_cap(uint8_t type)
     if (type >= NET_MESSAGE_FIRST_STREAM)
     {
         return NET_CAP_STREAM;
+    }
+    if (type >= NET_MESSAGE_FIRST_ACTION && type <= NET_MESSAGE_LAST_ACTION)
+    {
+        return NET_CAP_GAMEPAD | NET_CAP_STREAM | NET_CAP_SETTINGS;   // the frontend's action table decides each one
     }
     return NET_CAP_GAMEPAD;
 }

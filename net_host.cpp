@@ -99,6 +99,8 @@ static int ENET_CALLBACK intercept(ENetHost* enet, void* event)
             reply.kind = host->discovery_kind;
             reply.offers = host->discovery_offers;
             reply.signed_build = host->discovery_signed;
+            std::memcpy(reply.key_id, host->discovery_key_id, sizeof(reply.key_id));
+            reply.key_id_known = host->discovery_key_id_known;
             std::snprintf(reply.name, sizeof(reply.name), "%s", host->name.c_str());
             uint8_t packet[NET_DISCOVERY_MAX_PACKET];
             size_t packet_size = net_discovery_write_reply(packet, sizeof(packet), &reply);
@@ -677,6 +679,12 @@ void net_host_set_discovery_info(NetHost* host, uint8_t kind, uint32_t offers, b
     host->discovery_kind = kind;
     host->discovery_offers = offers;
     host->discovery_signed = signed_build;
+}
+
+void net_host_set_discovery_key(NetHost* host, const uint8_t* public_key)
+{
+    std::memcpy(host->discovery_key_id, public_key, NET_DISCOVERY_KEY_ID_SIZE);
+    host->discovery_key_id_known = true;
 }
 
 bool net_host_discover(NetHost* host, uint16_t port)

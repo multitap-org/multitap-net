@@ -179,6 +179,11 @@ bool net_session_poll(NetSession* session, NetSessionEvent* event)
         case NetEventType::none:
             break;
         case NetEventType::discovered:
+            if (net.discovered.key_id_known &&
+                std::memcmp(net.discovered.key_id, session->identity.public_key, NET_DISCOVERY_KEY_ID_SIZE) == 0)
+            {
+                break;   // our own answer (another socket of this device): a device doesn't list itself
+            }
             event->type = NetSessionEventType::discovered;
             event->address = net.address;
             event->discovered = net.discovered;

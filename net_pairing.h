@@ -8,7 +8,9 @@
 // Every control message starts with a type byte. Types below
 // NET_MESSAGE_FIRST_APP belong to this layer; the rest are the application's,
 // and the type says the capability it needs (net_message_required_cap):
-//   16..63 GAMEPAD, 64..127 STREAM, 128..191 SETTINGS, 192..255 SHARE.
+//   16..63 GAMEPAD, 64..127 STREAM, 128..191 SETTINGS, 192..255 SHARE,
+// except the action messages (NET_MESSAGE_FIRST_ACTION..LAST_ACTION, inside
+// the GAMEPAD range): any of GAMEPAD, STREAM or SETTINGS lets them through.
 // Each range is one capability (independent bits, net_trust.h). The host
 // drops what a device's capabilities don't cover; the client is told what it
 // has (welcome) only to show it.
@@ -80,10 +82,19 @@ constexpr uint8_t NET_MESSAGE_FIRST_APP = 16;
 constexpr uint8_t NET_MESSAGE_FIRST_STREAM = 64;
 constexpr uint8_t NET_MESSAGE_FIRST_SETTINGS = 128;
 constexpr uint8_t NET_MESSAGE_FIRST_SHARE = 192;   // files (net_share)
+// The action messages (actions_request, actions_result, action: the frontend
+// library numbers them, net_settings.h). Each action needs its own capability
+// (save: STREAM, reset: SETTINGS ...), which only the frontend's action table
+// knows, so the transport lets them through with any of the three and the
+// table decides. Otherwise a device with STREAM or SETTINGS and no GAMEPAD
+// would be offered actions whose messages never arrive.
+constexpr uint8_t NET_MESSAGE_FIRST_ACTION = 17;
+constexpr uint8_t NET_MESSAGE_LAST_ACTION = 19;
 
-// The capability an application message type needs (one bit).
+// The capabilities an application message type needs: one bit, except the
+// action messages (three bits: any of them is enough).
 NetCaps net_message_required_cap(uint8_t type);
-// True if `have` includes the capability message `type` needs.
+// True if `have` includes any of the capabilities message `type` needs.
 bool net_caps_allow(NetCaps have, uint8_t type);
 
 constexpr size_t NET_PAIR_CODE_DIGITS = 9;
@@ -138,7 +149,8 @@ void net_pair_confirm(const uint8_t* isk, bool from_host, uint8_t* confirm);
 // NET_DEVICE_NAME_MAX bytes. Returns the length.
 size_t net_pair_name_bytes(const char* name, uint8_t* out);
 
-// `info->name` set from `name` (cut as the messages cut it).
+// `info->name` set from `name` (cut as the messages cut it, control characters
+// replaced: net_name_clean).
 void net_device_info_set_name(NetDeviceInfo* info, const char* name);
 
 // Message type of a control payload, or 0 if empty.

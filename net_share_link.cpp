@@ -21,6 +21,13 @@ static bool same_address(const NetAddress* a, const NetAddress* b)
 // With the lock held: a discovery reply, kept (or refreshed) in `found`.
 static void on_discovered(NetShareLink* link, const NetEvent* event, double now)
 {
+    // This device's own listener answers too (our socket is another one):
+    // a device doesn't list itself.
+    if (event->discovered.key_id_known &&
+        std::memcmp(event->discovered.key_id, link->client.our_key, NET_DISCOVERY_KEY_ID_SIZE) == 0)
+    {
+        return;
+    }
     NetAddress address = event->address;
     address.port = event->discovered.port;
     NetShareLinkFound* slot = nullptr;
@@ -40,6 +47,15 @@ static void on_discovered(NetShareLink* link, const NetEvent* event, double now)
         slot = &link->found[link->found_count];
         link->found_count++;
         slot->address = address;
+    }
+    // A version 3 device also sends a version 2 reply: the one that comes
+    // second must not wipe the key_id the first one gave (same name: same
+    // device; another name: another device at this address).
+    bool same_device = slot->name == event->discovered.name;
+    if (event->discovered.key_id_known || !same_device)
+    {
+        std::memcpy(slot->key_id, event->discovered.key_id, sizeof(slot->key_id));
+        slot->key_id_known = event->discovered.key_id_known;
     }
     slot->name = event->discovered.name;
     slot->kind = event->discovered.kind < NET_APP_KIND_COUNT ? static_cast<NetAppKind>(event->discovered.kind)
@@ -150,8 +166,8 @@ static void poll_client(NetShareLink* link)
             }
             else
             {
-                // Our code: the other piccolo's user types it in INVITE, which
-                // waits in the code's pairing room (net_access_invite).
+                // The code our user typed, shown by the other device in
+                // GENERATE PAIRING CODE, which waits in the code's pairing room.
                 started = net_client_pair_beacon(&link->client, link->servers, link->server_count,
                                                  link->connect_code.c_str());
             }
@@ -449,7 +465,10 @@ void net_share_link_status(NetShareLink* link, NetShareLinkStatus* status)
     status->found.clear();
     for (uint32_t i = 0; i < link->found_count; i++)
     {
-        status->found.push_back(link->found[i]);
+        NetShareLinkFound found = link->found[i];
+        // Paired by key, never by name (every install may be called PICCOLO).
+        found.paired = found.key_id_known && net_trust_has_key_id(&link->client.trust, found.key_id);
+        status->found.push_back(found);
     }
     status->paired.clear();
     for (size_t i = 0; i < link->client.trust.devices.size(); i++)
