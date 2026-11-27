@@ -20,12 +20,9 @@
 // (every install may be called PICCOLO):
 //   REPLY v3 ... | flags (u8) | key_id (8 bytes) | name length (u8) | name   29 + name
 // flags bit 1: key_id is filled.
-// How the versions live together: the REQUEST stays version 2 (a version 2
-// host only answers its own version), and a version 2 reader refuses any
-// reply that isn't exactly version 2, so a version 3 host sends each device
-// both a version 2 and a version 3 reply (net_host.cpp). An old reader takes
-// the first; a new one takes both, the same device and nonce, and keeps the
-// version 3 (net_host's `discovered` queue).
+// Requests and replies are both version 3: a host only answers requests of its
+// own version, so builds from before it don't see newer ones on the LAN
+// (nothing was released with them; Andrés, 2026-11-26).
 // The nonce lets a client match replies to its own request and ignore stale
 // ones. `port` is where the host's ENet listens (today the same port).
 // `kind` and `offers` say what the device is and what it serves (net_trust.h:
@@ -47,7 +44,6 @@
 #include <cstdint>
 
 constexpr uint8_t NET_DISCOVERY_VERSION = 3;           // the newest reply
-constexpr uint8_t NET_DISCOVERY_REQUEST_VERSION = 2;   // requests stay as old hosts read them
 constexpr size_t  NET_DISCOVERY_KEY_ID_SIZE = 8;       // the first bytes of the device's public key
 constexpr size_t  NET_DISCOVERY_MAX_NAME = 63;   // bytes of UTF-8
 constexpr size_t  NET_DISCOVERY_REQUEST_SIZE = 12;
@@ -77,7 +73,7 @@ size_t net_discovery_write_request(uint8_t* out, size_t capacity, uint32_t nonce
 size_t net_discovery_write_reply(uint8_t* out, size_t capacity, const NetDiscoveryReply* reply);
 
 // False (silently: anyone can send anything to an open port) when the data
-// isn't exactly that packet (a request of version 2; a reply of version 1, 2
-// or 3). The name comes back cleaned (net_name_clean).
+// isn't exactly that packet (a request of this version; a reply of version 1,
+// 2 or 3). The name comes back cleaned (net_name_clean).
 bool net_discovery_read_request(const uint8_t* data, size_t size, uint32_t* nonce);
 bool net_discovery_read_reply(const uint8_t* data, size_t size, NetDiscoveryReply* reply);

@@ -72,7 +72,7 @@ size_t net_discovery_write_request(uint8_t* out, size_t capacity, uint32_t nonce
     {
         return 0;
     }
-    write_header(out, TYPE_REQUEST, NET_DISCOVERY_REQUEST_VERSION, nonce);
+    write_header(out, TYPE_REQUEST, NET_DISCOVERY_VERSION, nonce);
     return NET_DISCOVERY_REQUEST_SIZE;
 }
 
@@ -83,7 +83,7 @@ bool net_discovery_read_request(const uint8_t* data, size_t size, uint32_t* nonc
         return false;
     }
     uint8_t version = 0;
-    return read_header(data, size, TYPE_REQUEST, nonce, &version) && version == NET_DISCOVERY_REQUEST_VERSION;
+    return read_header(data, size, TYPE_REQUEST, nonce, &version) && version == NET_DISCOVERY_VERSION;
 }
 
 size_t net_discovery_write_reply(uint8_t* out, size_t capacity, const NetDiscoveryReply* reply)

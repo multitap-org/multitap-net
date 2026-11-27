@@ -102,19 +102,9 @@ static int ENET_CALLBACK intercept(ENetHost* enet, void* event)
             std::memcpy(reply.key_id, host->discovery_key_id, sizeof(reply.key_id));
             reply.key_id_known = host->discovery_key_id_known;
             std::snprintf(reply.name, sizeof(reply.name), "%s", host->name.c_str());
-            // Version 2 first, for the devices that read nothing newer, then
-            // version 3 (net_discovery.h): a new reader keeps the better one.
             uint8_t packet[NET_DISCOVERY_MAX_PACKET];
-            reply.version = 2;
             size_t packet_size = net_discovery_write_reply(packet, sizeof(packet), &reply);
-            bool sent = packet_size > 0 && send_raw(enet, &enet->receivedAddress, packet, packet_size);
-            reply.version = NET_DISCOVERY_VERSION;
-            packet_size = net_discovery_write_reply(packet, sizeof(packet), &reply);
             if (packet_size > 0 && send_raw(enet, &enet->receivedAddress, packet, packet_size))
-            {
-                sent = true;
-            }
-            if (sent)
             {
                 host->discovery_requests_answered++;
             }
@@ -141,34 +131,11 @@ static int ENET_CALLBACK intercept(ENetHost* enet, void* event)
     {
         // Only answers to our own last request; a full queue drops the rest
         // (the client asks again).
-        if (!host->listener && reply.nonce == host->discovery_nonce)
+        if (!host->listener && reply.nonce == host->discovery_nonce && host->discovered_count < NET_MAX_DISCOVERED)
         {
-            // A version 3 device sends a version 2 and a version 3 reply: one
-            // entry per device and nonce, the newer version wins.
-            NetAddress from = address_from_enet(&enet->receivedAddress);
-            uint32_t same = host->discovered_count;
-            for (uint32_t i = 0; i < host->discovered_count && same == host->discovered_count; i++)
-            {
-                if (host->discovered[i].port == reply.port && host->discovered[i].nonce == reply.nonce &&
-                    host->discovered_from[i].port == from.port &&
-                    std::memcmp(host->discovered_from[i].ip, from.ip, sizeof(from.ip)) == 0)
-                {
-                    same = i;
-                }
-            }
-            if (same < host->discovered_count)
-            {
-                if (reply.version > host->discovered[same].version)
-                {
-                    host->discovered[same] = reply;
-                }
-            }
-            else if (host->discovered_count < NET_MAX_DISCOVERED)
-            {
-                host->discovered[host->discovered_count] = reply;
-                host->discovered_from[host->discovered_count] = from;
-                host->discovered_count++;
-            }
+            host->discovered[host->discovered_count] = reply;
+            host->discovered_from[host->discovered_count] = address_from_enet(&enet->receivedAddress);
+            host->discovered_count++;
         }
         return 1;
     }

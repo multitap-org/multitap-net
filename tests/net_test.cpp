@@ -245,10 +245,10 @@ static void test_discovery_packets()
     check(!net_discovery_read_reply(v3_packet, v3_size, &read), "v3 reply with unknown flags refused");
     v3_packet[19] = 3;
     check(!net_discovery_read_reply(v3_packet, v3_size - 1, &read), "v3 reply with a wrong length refused");
-    // A request stays version 2: the hosts of the previous version still answer it.
+    // Requests are this version too: a host answers only its own.
     uint8_t request[NET_DISCOVERY_REQUEST_SIZE];
     net_discovery_write_request(request, sizeof(request), 9);
-    check(request[5] == 2, "requests are written as version 2");
+    check(request[5] == NET_DISCOVERY_VERSION, "requests are written as this version");
     check(!net_discovery_read_request(packet, size, &nonce), "a reply is not a request");
     check(!net_discovery_read_reply(packet, size + 1, &read), "reply with a wrong length refused");
     packet[NET_DISCOVERY_REPLY_HEADER_SIZE + 3] = 0;
