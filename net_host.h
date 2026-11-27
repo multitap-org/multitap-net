@@ -133,6 +133,8 @@ struct NetHost
     uint8_t     discovery_kind = 0;    // and these with it (net_host_set_discovery_info)
     uint32_t    discovery_offers = 0;
     bool        discovery_signed = false;
+    uint8_t     discovery_key_id[NET_DISCOVERY_KEY_ID_SIZE] = {};   // net_host_set_discovery_key
+    bool        discovery_key_id_known = false;
     _ENetPacket* held_packet = nullptr;   // the last `received` packet, freed at the next poll
     uint32_t    discovery_nonce = 0;   // of our last request (client)
     NetDiscoveryReply discovered[NET_MAX_DISCOVERED];
@@ -176,6 +178,10 @@ bool net_host_discover(NetHost* host, uint16_t port);
 bool net_host_discover_devices(NetHost* host);
 // A listener: what it answers besides its name (net_discovery.h).
 void net_host_set_discovery_info(NetHost* host, uint8_t kind, uint32_t offers, bool signed_build);
+// A listener: its public key (NET_KEY_SIZE bytes), of which discovery answers
+// carry the first NET_DISCOVERY_KEY_ID_SIZE (version 3). Without it the
+// answers say no key.
+void net_host_set_discovery_key(NetHost* host, const uint8_t* public_key);
 bool net_host_discover_at(NetHost* host, NetAddress address);
 
 // One datagram of our own (a beacon message) on the host's socket, outside

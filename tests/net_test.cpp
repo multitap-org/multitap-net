@@ -85,6 +85,13 @@ static void test_caps()
     check(net_message_required_cap(NET_MESSAGE_FIRST_SHARE) == NET_CAP_SHARE && net_message_required_cap(255) == NET_CAP_SHARE,
           "192..255 need SHARE");
     check(!net_caps_allow(NET_CAP_STREAM, 16), "STREAM doesn't imply GAMEPAD (independent bits)");
+    check(net_caps_allow(NET_CAP_GAMEPAD, NET_MESSAGE_FIRST_ACTION) && net_caps_allow(NET_CAP_STREAM, 18) &&
+              net_caps_allow(NET_CAP_SETTINGS, NET_MESSAGE_LAST_ACTION),
+          "the action messages (17..19) pass with any of GAMEPAD, STREAM or SETTINGS");
+    check(!net_caps_allow(NET_CAP_SHARE, NET_MESSAGE_FIRST_ACTION) && !net_caps_allow(0, 18) &&
+              !net_caps_allow(NET_CAP_STREAM, NET_MESSAGE_FIRST_ACTION - 1) &&
+              !net_caps_allow(NET_CAP_STREAM, NET_MESSAGE_LAST_ACTION + 1),
+          "SHARE or nothing doesn't pass them, and 16 and 20 still need GAMEPAD");
     check(!net_caps_allow(NET_CAP_SETTINGS, NET_MESSAGE_FIRST_SHARE), "SETTINGS doesn't include SHARE");
     check(net_caps_allow(NET_CAP_GAMEPAD | NET_CAP_SHARE, 200) && !net_caps_allow(NET_CAP_GAMEPAD | NET_CAP_SHARE, 130),
           "a set allows exactly its bits");
@@ -134,6 +141,21 @@ static void test_caps()
     check(!net_message_read_hello(message, size - 1, &read), "hello cut short refused");
     message[1 + 1 + 4] = 9;   // the kind byte, after the name
     check(!net_message_read_hello(message, size, &read), "hello with an unknown kind refused");
+    // A name with a line break and a control byte (written raw, as a hostile
+    // device would) reads clean; UTF-8 stays.
+    std::snprintf(host.name, sizeof(host.name), "Bad\nName\x01" "end \xC3\xA9");
+    size = net_message_write_hello(message, sizeof(message), &host);
+    check(size > 0 && net_message_read_hello(message, size, &read) && std::strcmp(read.name, "Bad_Name_end \xC3\xA9") == 0,
+          "hello name: line break and control byte replaced, UTF-8 kept");
+    check(net_name_clean("a\r\nb").compare("a__b") == 0, "net_name_clean: CR LF");
+    NetTrust key_trust;
+    uint8_t key_a[NET_KEY_SIZE] = {};
+    uint8_t key_b[NET_KEY_SIZE] = {};
+    key_a[0] = 1;
+    key_b[0] = 2;
+    net_trust_add(&key_trust, key_a, "A");
+    check(net_trust_has_key_id(&key_trust, key_a) && !net_trust_has_key_id(&key_trust, key_b),
+          "net_trust_has_key_id: a trusted key's first bytes");
     size = net_message_write_grant(message, sizeof(message), NET_CAP_GAMEPAD | NET_CAP_STREAM);
     check(size == 5 && net_message_read_grant(message, size, &told) && told == (NET_CAP_GAMEPAD | NET_CAP_STREAM),
           "grant round trip");
@@ -166,14 +188,45 @@ static void test_discovery_packets()
     reply.offers = NET_CAP_SHARE | NET_CAP_SETTINGS;
     reply.signed_build = true;
     std::snprintf(reply.name, sizeof(reply.name), "Living room PC");
+    // Version 3: carries the first 8 bytes of the key.
+    for (uint32_t i = 0; i < NET_DISCOVERY_KEY_ID_SIZE; i++)
+    {
+        reply.key_id[i] = static_cast<uint8_t>(0xA0 + i);
+    }
+    reply.key_id_known = true;
     size = net_discovery_write_reply(packet, sizeof(packet), &reply);
     NetDiscoveryReply read;
-    check(size == NET_DISCOVERY_REPLY_HEADER_SIZE + std::strlen("Living room PC"), "reply size");
+    check(size == NET_DISCOVERY_V3_REPLY_HEADER_SIZE + std::strlen("Living room PC"), "reply size");
     check(net_discovery_read_reply(packet, size, &read), "reply round trip");
     check(read.nonce == 42 && read.port == 55420 && std::strcmp(read.name, "Living room PC") == 0, "reply fields");
-    check(read.version == 2 && read.kind == static_cast<uint8_t>(NetAppKind::piccolino) &&
+    check(read.version == 3 && read.kind == static_cast<uint8_t>(NetAppKind::piccolino) &&
               read.offers == (NET_CAP_SHARE | NET_CAP_SETTINGS) && read.signed_build,
-          "v2 reply: kind, offers, signed");
+          "v3 reply: kind, offers, signed");
+    check(read.key_id_known && std::memcmp(read.key_id, reply.key_id, NET_DISCOVERY_KEY_ID_SIZE) == 0,
+          "v3 reply: the key id round trips");
+    reply.key_id_known = false;
+    size_t unknown_size = net_discovery_write_reply(packet, sizeof(packet), &reply);
+    check(net_discovery_read_reply(packet, unknown_size, &read) && !read.key_id_known, "v3 without a key: not known");
+    reply.key_id_known = true;
+    uint8_t v3_packet[NET_DISCOVERY_MAX_PACKET];
+    size_t v3_size = net_discovery_write_reply(v3_packet, sizeof(v3_packet), &reply);
+
+    // A version 2 reply (the previous version), written and read: everything
+    // but the key id, which it never has.
+    reply.version = 2;
+    size = net_discovery_write_reply(packet, sizeof(packet), &reply);
+    check(size == NET_DISCOVERY_REPLY_HEADER_SIZE + std::strlen("Living room PC"), "v2 reply size");
+    read = NetDiscoveryReply{};
+    check(net_discovery_read_reply(packet, size, &read), "v2 reply read by the new reader");
+    check(read.version == 2 && read.port == 55420 && std::strcmp(read.name, "Living room PC") == 0 &&
+              read.kind == static_cast<uint8_t>(NetAppKind::piccolino) &&
+              read.offers == (NET_CAP_SHARE | NET_CAP_SETTINGS) && read.signed_build && !read.key_id_known,
+          "v2 reply: kind, offers, signed, no key id");
+    // The v3 packet read "as far as v2": the same name, kind and offers.
+    check(net_discovery_read_reply(v3_packet, v3_size, &read) && read.port == 55420 &&
+              std::strcmp(read.name, "Living room PC") == 0 && read.kind == static_cast<uint8_t>(NetAppKind::piccolino) &&
+              read.offers == (NET_CAP_SHARE | NET_CAP_SETTINGS),
+          "v3 reply: the v2 fields are the same");
     // A version 1 reply (an older device): port and name only, still read.
     uint8_t old[NET_DISCOVERY_MAX_PACKET];
     std::memcpy(old, packet, 12);
@@ -183,15 +236,30 @@ static void test_discovery_packets()
     old[14] = 3;
     std::memcpy(old + 15, "Old", 3);
     check(net_discovery_read_reply(old, 18, &read) && read.version == 1 && read.port == 55420 &&
-              std::strcmp(read.name, "Old") == 0 && read.offers == 0,
+              std::strcmp(read.name, "Old") == 0 && read.offers == 0 && !read.key_id_known,
           "v1 reply still read (no offers)");
     packet[19] = 2;
     check(!net_discovery_read_reply(packet, size, &read), "v2 reply with unknown flags refused");
     packet[19] = 1;
+    v3_packet[19] = 4;
+    check(!net_discovery_read_reply(v3_packet, v3_size, &read), "v3 reply with unknown flags refused");
+    v3_packet[19] = 3;
+    check(!net_discovery_read_reply(v3_packet, v3_size - 1, &read), "v3 reply with a wrong length refused");
+    // Requests are this version too: a host answers only its own.
+    uint8_t request[NET_DISCOVERY_REQUEST_SIZE];
+    net_discovery_write_request(request, sizeof(request), 9);
+    check(request[5] == NET_DISCOVERY_VERSION, "requests are written as this version");
     check(!net_discovery_read_request(packet, size, &nonce), "a reply is not a request");
     check(!net_discovery_read_reply(packet, size + 1, &read), "reply with a wrong length refused");
     packet[NET_DISCOVERY_REPLY_HEADER_SIZE + 3] = 0;
     check(!net_discovery_read_reply(packet, size, &read), "reply with a NUL in the name refused");
+
+    // Names come off the wire clean: a line break and a control byte become '_'.
+    NetDiscoveryReply dirty;
+    std::snprintf(dirty.name, sizeof(dirty.name), "Bad\nName\x01!");
+    size = net_discovery_write_reply(packet, sizeof(packet), &dirty);
+    check(net_discovery_read_reply(packet, size, &read) && std::strcmp(read.name, "Bad_Name_!") == 0,
+          "discovery name: line break and control byte replaced");
 
 }
 
@@ -633,6 +701,8 @@ struct PairLoop
     uint32_t host_events = 0;
     bool host_got_message = false;
     bool host_got_stream_message = false;
+    uint8_t host_last_key[NET_KEY_SIZE] = {};   // the key of the last pad packet's event
+    bool host_got_pad_packet = false;   // an input-channel packet of 2 bytes {5, 'p'} reached the frontend
     bool client_got_message = false;
     bool client_got_caps = false;
     bool client_closed = false;
@@ -706,6 +776,12 @@ static void pair_pump(PairLoop* loop)
         {
             loop->host_unpaired = true;
             loop->host_unpaired_name = host_event.info.name;
+        }
+        if (host_event.type == NetAccessEventType::message && host_event.channel == NetChannel::input &&
+            host_event.size == 2 && host_event.data[0] == 5 && host_event.data[1] == 'p')
+        {
+            loop->host_got_pad_packet = true;
+            std::memcpy(loop->host_last_key, host_event.key, NET_KEY_SIZE);
         }
         if (host_event.type == NetAccessEventType::message && host_event.channel == NetChannel::control &&
             host_event.size == 2 && host_event.data[0] == NET_MESSAGE_FIRST_STREAM)
@@ -1040,6 +1116,28 @@ static void test_pairing(const char* folder)
     check(loop->host_got_stream_message, "with STREAM: stream message delivered");
     net_trust_load(&saved, host_trust.c_str());
     check(saved.devices.size() == 1 && saved.devices[0].grants == NET_CAPS_ALL, "grants saved");
+
+    // The input channel needs GAMEPAD too: a pad packet from a device granted
+    // no GAMEPAD is dropped and counted; granted it, it goes through. The
+    // message carries the device's key (the index may change under a reader).
+    uint32_t dropped_before = loop->host.dropped_by_access;
+    loop->client_got_caps = false;
+    net_access_set_grants(&loop->host, 0, NET_CAP_SETTINGS | NET_CAP_STREAM);
+    pump_while(loop, &loop->client_got_caps, true);
+    const uint8_t pad_packet[] = {5, 'p'};
+    loop->host_got_pad_packet = false;
+    check(net_client_send(&loop->client, NetChannel::input, pad_packet, sizeof(pad_packet)), "pad packet sent");
+    pump_for(loop, 200);
+    check(!loop->host_got_pad_packet && loop->host.dropped_by_access == dropped_before + 1,
+          "no GAMEPAD: pad packet dropped and counted");
+    loop->client_got_caps = false;
+    net_access_set_grants(&loop->host, 0, NET_CAPS_ALL);
+    pump_while(loop, &loop->client_got_caps, true);
+    net_client_send(&loop->client, NetChannel::input, pad_packet, sizeof(pad_packet));
+    pump_while(loop, &loop->host_got_pad_packet, true);
+    check(loop->host_got_pad_packet, "with GAMEPAD: pad packet delivered");
+    check(std::memcmp(loop->host_last_key, client_key.public_key, NET_KEY_SIZE) == 0,
+          "the message event carries the device's key");
 
     loop->client_closed = false;
     net_access_remove_device(&loop->host, 0);
