@@ -10,6 +10,13 @@
 //
 // Every peer slot has a generation: a callback that was already queued when
 // a slot was torn down (and maybe reused) is recognized and dropped.
+//
+// Library lifetime: when its last connection goes away, libdatachannel
+// cleans up its globals (thread pool, SCTP, DTLS, ICE) on a detached thread
+// of its own. A process that exits meanwhile races that thread (on Windows
+// it aborted in a destroyed shared_mutex). So every NetRtc and NetRtcSocket
+// holds the library: the first one preloads it (no automatic cleanup), the
+// last one runs rtcCleanup, which waits until the cleanup is done.
 
 #include "net_rtc.h"
 
@@ -27,6 +34,31 @@
 #include "host_log.h"
 
 constexpr uint32_t QUEUE_SIZE = 64;
+
+static std::mutex g_library_lock;
+static uint32_t   g_library_users = 0;
+
+static void library_hold()
+{
+    g_library_lock.lock();
+    if (g_library_users == 0)
+    {
+        rtcPreload();
+    }
+    g_library_users++;
+    g_library_lock.unlock();
+}
+
+static void library_release()
+{
+    g_library_lock.lock();
+    g_library_users--;
+    if (g_library_users == 0)
+    {
+        rtcCleanup();
+    }
+    g_library_lock.unlock();
+}
 
 enum class Queued : uint8_t
 {
@@ -214,6 +246,7 @@ NetRtc* net_rtc_create(const char* stun)
         rtcInitLogger(log_level(), on_log);
         logger = true;
     }
+    library_hold();
     NetRtc* rtc = new NetRtc();
     rtc->stun = stun != nullptr ? stun : "";
     rtc->receive.resize(NET_RTC_MAX_MESSAGE);
@@ -269,6 +302,7 @@ void net_rtc_destroy(NetRtc* rtc)
         }
     }
     delete rtc;
+    library_release();
 }
 
 // The three channels, negotiated out of band with fixed stream ids (both
@@ -591,6 +625,7 @@ static void RTC_API on_socket_error(int ws, const char* error, void* user)
 
 NetRtcSocket* net_rtc_socket_open(const char* url)
 {
+    library_hold();
     NetRtcSocket* socket = new NetRtcSocket();
     socket->receive.resize(BEACON_SIGNALING_MAX_SIZE);
     rtcWsConfiguration config = {};
@@ -613,6 +648,7 @@ NetRtcSocket* net_rtc_socket_open(const char* url)
     {
         host_log(LogLevel::warning, "Network: can't open the signaling socket to %s", url);
         delete socket;
+        library_release();
         return nullptr;
     }
     rtcSetUserPointer(socket->ws, socket);
@@ -633,6 +669,7 @@ void net_rtc_socket_close(NetRtcSocket* socket)
         rtcDeleteWebSocket(socket->ws);   // no callbacks after it returns
     }
     delete socket;
+    library_release();
 }
 
 NetRtcSocketEvent net_rtc_socket_poll(NetRtcSocket* socket, const uint8_t** data, size_t* size)
